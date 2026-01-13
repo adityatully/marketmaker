@@ -1,4 +1,6 @@
 use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MarketState}};
+
+use crate::shm::fill_queue_mm::MarketMakerFillQueue;
 //use std::time::Instant;
 const MAX_SYMBOLS : usize = 100;
 
@@ -25,13 +27,19 @@ impl SymbolState{
 }
 
 pub struct MarketMaker{
+    pub fill_queue : MarketMakerFillQueue,
     pub symbol_detials : [SymbolState ; MAX_SYMBOLS],
     pub volitality_estimator : VolatilityEstimator
 }
 
 impl MarketMaker{
     pub fn new()->Self{
+        let fill_queue = MarketMakerFillQueue::open("/tmp/MarketMakerFills");
+        if fill_queue.is_err(){
+            eprintln!("failed to open the fill queue");
+        }
         Self { 
+            fill_queue : fill_queue.unwrap(),
             symbol_detials: std::array::from_fn(|_| SymbolState::new()), 
             volitality_estimator: VolatilityEstimator::new()
         }
