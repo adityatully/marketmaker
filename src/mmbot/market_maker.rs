@@ -1,12 +1,16 @@
 use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MarketState}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
-use std::{mem::MaybeUninit, time::{Duration, Instant}};
+use std::{time::{Duration, Instant}};
 use crate::{mmbot::rolling_price::RollingPrice, shm::{feed_queue_mm::MarketMakerFeedQueue, fill_queue_mm::MarketMakerFillQueue}};
+use rust_decimal::prelude::ToPrimitive;
 //use std::time::Instant;
 const MAX_SYMBOLS : usize = 100;
+const SAMPLE_GAP : Duration = Duration::from_millis(50);
+const VOLITILTY_CALC_GAP  : Duration = Duration::from_millis(100);
 const QUOTING_GAP : Duration = Duration::from_millis(200);
-const SAMPLE_GAP : Duration = Duration::from_millis(100);
-const VOLITILTY_CALC_GAP  : Duration = Duration::from_millis(500);
-
+const TARGET_INVENTORY : Decimal = dec!(0); 
+const MAX_SIZE : Decimal = dec!(50) ; 
+const INVENTORY_CAP :Decimal = dec!(1000);
+const MAX_BOOK_MULT : Decimal = dec!(2);
 
 #[derive(Debug , Clone)]
 pub struct SymbolState{
@@ -15,6 +19,8 @@ pub struct SymbolState{
     pub time_to_terminal : u64,        
     pub liquidity_k: Decimal,            // order intensity 
     pub market_state : MarketState,
+    pub best_bid_qty: u32,
+    pub best_ask_qty: u32,
     pub prices : RollingPrice ,
     pub last_quoted : Instant ,
     pub last_volitlitly_calc : Instant ,
@@ -33,9 +39,88 @@ impl SymbolState{
             prices : RollingPrice::new(50, ipo_price),
             last_quoted : Instant::now() ,
             last_volitlitly_calc : Instant::now() , 
-            last_sampled : Instant::now()
+            last_sampled : Instant::now() , 
+            best_ask_qty : 10 ,
+            best_bid_qty : 10
         }
+        // find the sollutiton for the best bid and the best ask value at cold start 
     }
+    pub fn compute_quote_sizes(
+        &self,
+    ) -> (u64, u64) {
+       
+        if INVENTORY_CAP <= dec!(0) || MAX_SIZE == dec!(0) {
+            return (0, 0);
+        }
+
+      
+        let inv = self.inventory.quantity;
+        let dev = inv - TARGET_INVENTORY; 
+        let abs_dev = dev.abs();
+
+        
+        let vol = self.market_state.volatility.max(dec!(0));
+        let vol_factor = dec!(1) / (dec!(1) + vol); // in (0,1]
+
+        let inv_ratio = (abs_dev / INVENTORY_CAP).min(dec!(1));
+
+        
+        let inv_ratio_f = inv_ratio.to_f64().unwrap_or(1.0);
+        let vol_factor_f = vol_factor.to_f64().unwrap_or(0.1);
+
+       
+        let mut base = (MAX_SIZE.to_f64().unwrap_or(50.0) * vol_factor_f).round() as i64;
+        base = base.max(1);
+
+        
+        let risky_mult = (1.0 - inv_ratio_f).clamp(0.0, 1.0);
+        let safe_mult  = (1.0 + inv_ratio_f).clamp(1.0, 2.0);
+
+        let (mut bid_size, mut ask_size) = if dev >= dec!(0) {
+            // too long => don't buy more, sell more
+            ((base as f64 * risky_mult).round() as i64,
+             (base as f64 * safe_mult).round() as i64)
+        } else {
+            // too short => buy more, don't sell more
+            ((base as f64 * safe_mult).round() as i64,
+             (base as f64 * risky_mult).round() as i64)
+        };
+
+        
+        if abs_dev >= INVENTORY_CAP {
+          
+            if dev > dec!(0) {
+              
+                bid_size = 0;
+            } else if dev < dec!(0) {
+              
+                ask_size = 0;
+            } else {
+               
+            }
+        }
+
+      
+        let max_size_i64 = MAX_SIZE.to_i64().unwrap_or(50);
+        bid_size = bid_size.clamp(0, max_size_i64);
+        ask_size = ask_size.clamp(0, max_size_i64);
+
+        let best_bid_qty = self.best_bid_qty as u64;
+        let best_ask_qty = self.best_ask_qty as u64;
+        let max_book_mult_u64 = MAX_BOOK_MULT.to_u64().unwrap_or(2);
+
+        if best_bid_qty > 0 {
+            let cap = best_bid_qty.saturating_mul(max_book_mult_u64).max(1);
+            bid_size = bid_size.min(cap as i64);
+        }
+        if best_ask_qty > 0 {
+            let cap = best_ask_qty.saturating_mul(max_book_mult_u64).max(1);
+            ask_size = ask_size.min(cap as i64);
+        }
+
+        (bid_size as u64, ask_size as u64)
+    }
+    
 }
 
 pub struct MarketMaker{
@@ -96,7 +181,9 @@ impl MarketMaker{
                 if let Some( symbol_state) = self.symbol_detials[symbol as usize].as_mut(){
                     let mid_price = (market_feed.best_bid + market_feed.best_ask)/2;
                     // set in the market state 
-                    symbol_state.market_state.mid_price = Decimal::from(mid_price);    
+                    symbol_state.market_state.mid_price = Decimal::from(mid_price);   
+                    symbol_state.best_ask_qty = market_feed.best_ask_qty; 
+                    symbol_state.best_bid_qty = market_feed.best_bid_qty;
                 }
                 // find the mid price 
             }
@@ -107,6 +194,7 @@ impl MarketMaker{
 
                         if state.last_sampled.elapsed() >= SAMPLE_GAP{
                             state.prices.push(state.market_state.mid_price);
+                            state.last_sampled = Instant::now();
                         }
                         
                         if state.last_quoted.elapsed() >= QUOTING_GAP{
@@ -120,8 +208,11 @@ impl MarketMaker{
                             ){
                                 let bid_price = best_quote_prices.0;
                                 let ask_price = best_quote_prices.1;
+
+                                let (bid_size , ask_size) = state.compute_quote_sizes();
         
                                 // need to find sizes , form quotes , cancel all pending orders 
+                                
                             }
                         }
 
@@ -134,7 +225,7 @@ impl MarketMaker{
                         }
                     }
                     None => {
-                        println!("No symbol has been inititliased ")
+                       
                     }
                 }
             }
