@@ -23,7 +23,7 @@ pub struct QueueHeader {
 pub struct MessageFromApi{
     pub order_id: u64, // this will be 0 if it is a post order or else it will be the order_id which needst o be canceled
     pub client_id : u64,
-   // pub price: u64,
+    pub ipo_price: u64,
     pub timestamp: u64,
    // pub user_id : u64 , always 0 
     //pub shares_qty: u32,
@@ -42,7 +42,7 @@ const HEADER_SIZE: usize = std::mem::size_of::<QueueHeader>();
 const TOTAL_SIZE: usize = HEADER_SIZE + (QUEUE_CAPACITY * ORDER_SIZE);
 
 // Compile-time layout assertions (fail build if wrong)
-const _: () = assert!(ORDER_SIZE == 32, "Order must be 32 bytes");
+const _: () = assert!(ORDER_SIZE == 40, "Order must be 32 bytes");
 const _: () = assert!(HEADER_SIZE == 136, "QueueHeader must be 136 bytes");
 const _: () = {
     // Verify ConsumerTail is at offset 64

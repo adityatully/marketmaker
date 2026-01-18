@@ -1,7 +1,11 @@
 use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MarketState}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
 use std::{time::{Duration, Instant}};
-use crate::{mmbot::rolling_price::RollingPrice, shm::{feed_queue_mm::MarketMakerFeedQueue, fill_queue_mm::MarketMakerFillQueue, send_order_queue_mm::{MarketMakerOrderQueue, Order}}};
+use crate::{mmbot::rolling_price::RollingPrice, shm::{feed_queue_mm::MarketMakerFeedQueue, fill_queue_mm::MarketMakerFillQueue, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::MessageFromApiQueue}};
 use rust_decimal::prelude::ToPrimitive;
+
+
+
+
 //use std::time::Instant;
 const MAX_SYMBOLS : usize = 100;
 const SAMPLE_GAP : Duration = Duration::from_millis(50);
@@ -11,6 +15,13 @@ const TARGET_INVENTORY : Decimal = dec!(0);
 const MAX_SIZE : Decimal = dec!(50) ; 
 const INVENTORY_CAP :Decimal = dec!(1000);
 const MAX_BOOK_MULT : Decimal = dec!(2);
+
+
+#[derive(Debug , Clone, Copy)]
+pub struct PendingState{
+    pub exchange_order_id : Option<u64>,
+    pub mm_client_id      : u64
+}
 
 #[derive(Debug , Clone)]
 pub struct SymbolState{
@@ -23,9 +34,11 @@ pub struct SymbolState{
     pub best_bid_qty: u32,
     pub best_ask_qty: u32,
     pub prices : RollingPrice ,
+    pub pending_orders : Vec<PendingState>,
     pub last_quoted : Instant ,
     pub last_volitlitly_calc : Instant ,
-    pub last_sampled : Instant
+    pub last_sampled : Instant ,
+    pub next_client_id: u64,
 }
 
 // each symbol state shud have a defualt inventory for init 
@@ -39,11 +52,13 @@ impl SymbolState{
             liquidity_k: dec!(0), 
             market_state: MarketState::new(dec!(0), dec!(0), 0) ,
             prices : RollingPrice::new(50, ipo_price),
+            pending_orders : Vec::with_capacity(20),
             last_quoted : Instant::now() ,
             last_volitlitly_calc : Instant::now() , 
             last_sampled : Instant::now() , 
             best_ask_qty : 10 ,
-            best_bid_qty : 10
+            best_bid_qty : 10 , 
+            next_client_id : 1
         }
         // find the sollutiton for the best bid and the best ask value at cold start 
     }
@@ -55,7 +70,6 @@ impl SymbolState{
             return (0, 0);
         }
 
-      
         let inv = self.inventory.quantity;
         let dev = inv - TARGET_INVENTORY; 
         let abs_dev = dev.abs();
@@ -122,15 +136,23 @@ impl SymbolState{
 
         (bid_size as u64, ask_size as u64)
     }
+
+    pub fn generate_client_id(&mut self) -> u64 {
+        let id = self.next_client_id;
+        self.next_client_id += 1;
+        id
+    }
     
 }
 
 pub struct MarketMaker{
-    pub fill_queue  : MarketMakerFillQueue,
-    pub feed_queue  : MarketMakerFeedQueue,
-    pub order_queue : MarketMakerOrderQueue,
+    pub fill_queue    : MarketMakerFillQueue,
+    pub feed_queue    : MarketMakerFeedQueue,
+    pub order_queue   : MarketMakerOrderQueue,
+    pub message_queue : MessageFromApiQueue,
     pub symbol_detials : [Option<SymbolState> ; MAX_SYMBOLS],
     pub volitality_estimator : VolatilityEstimator ,
+   
 }
 
 impl MarketMaker{
@@ -147,12 +169,18 @@ impl MarketMaker{
         if order_queue.is_err(){
             eprint!("failed to open order queue");
         }
+        let message_from_api_queueu = MessageFromApiQueue::open("/tmp/MessageFromApiToMM");
+        if message_from_api_queueu.is_err(){
+            eprint!("fai;ed to open message queue");
+        }
         Self { 
             order_queue : order_queue.unwrap(),
             fill_queue : fill_queue.unwrap(),
             feed_queue : feed_queue.unwrap(),
+            message_queue : message_from_api_queueu.unwrap(),
             symbol_detials: std::array::from_fn(|_| None), 
             volitality_estimator: VolatilityEstimator::new() , 
+          
         }
     }
 
@@ -162,18 +190,89 @@ impl MarketMaker{
 
     pub fn run_market_maker(&mut self){
         loop {
+
+            while let Ok(Some(message)) = self.message_queue.dequeue(){
+                let symbol = message.symbol ;
+                match message.message_type{
+                    0 =>{
+                        // add this symbol 
+                        self.add_symbol(symbol, Decimal::from(message.ipo_price));
+                    }
+
+                    1=>{
+                        // acknowladgement that order has been placed 
+                        // we can update the order id for that client from NonE TO SOME 
+                        match self.symbol_detials[symbol as usize].as_mut(){
+                            Some(state)=>{
+                                for pending_order in &mut state.pending_orders{
+                                    if pending_order.mm_client_id == message.client_id{
+                                        pending_order.exchange_order_id = Some(message.order_id);
+                                    }
+                                }
+                            }
+                            None =>{}
+                        }
+                    }
+
+                    2=>{
+                        // acknowldagement that the order has been canceleed , so we can remove ut from the pemdng ordrs list 
+                        match self.symbol_detials[symbol as usize].as_mut(){
+                            Some(state)=>{
+                                state.pending_orders.retain(
+                                    |pending_state| 
+                                    match pending_state.exchange_order_id {
+                                        Some(order_id)=>{
+                                            order_id != message.order_id
+                                        }
+                                        None => true
+                                    }
+                                    
+                                );
+                            }
+                            None =>{}
+                        }
+                    }
+
+                    _=>{}
+                }
+
+            }
             while let Ok(Some(fill)) = self.fill_queue.dequeue(){
                 let symbol = fill.symbol;
                 if let Some(symbol_state) = self.symbol_detials[symbol as usize].as_mut(){
                     symbol_state.inventory.last_update = fill.timestamp;
-                    match fill.side_of_mm_order {
+                        match fill.side_of_mm_order {
                         0 =>{
                             // it was a buy order so we bought shares , add to the inventory 
                             symbol_state.inventory.quantity = symbol_state.inventory.quantity.saturating_add(Decimal::from(fill.fill_quantity));
+                            symbol_state.pending_orders.retain(|pending_state| 
+                                match pending_state.exchange_order_id {
+                                    Some(order_id)=>{
+                                        order_id != fill.order_id_mm_order
+                                    }
+                                    None =>{
+                                        // a case where ack has not yet been recived but the engine sent an event
+                                        true
+                                    }
+                                }
+                               
+                            );
                         }
                         1 =>{
                             // it was a sell order so we sold inventory 
                             symbol_state.inventory.quantity = symbol_state.inventory.quantity.saturating_sub(Decimal::from(fill.fill_quantity));
+                            symbol_state.pending_orders.retain(|pending_state| 
+                                match pending_state.exchange_order_id {
+                                    Some(order_id)=>{
+                                        order_id != fill.order_id_mm_order
+                                    }
+                                    None =>{
+                                        // a case where ack has not yet been recived but the engine sent an event
+                                        true
+                                    }
+                                }
+                               
+                            );
                         }
                         _=>{
 
@@ -195,16 +294,20 @@ impl MarketMaker{
                 // find the mid price 
             }
 
-            for   symbol_state in self.symbol_detials.iter_mut(){
+            for symbol_state in self.symbol_detials.iter_mut(){
                 match symbol_state{
                     Some(state)=>{
 
+                       
+                        
                         if state.last_sampled.elapsed() >= SAMPLE_GAP{
                             state.prices.push(state.market_state.mid_price);
                             state.last_sampled = Instant::now();
                         }
                         
                         if state.last_quoted.elapsed() >= QUOTING_GAP{
+                            let ask_client_id = state.generate_client_id();
+                            let bid_client_id = state.generate_client_id();
                             if let Ok(best_quote_prices) = calculate_optimal_quotes(
                                 state.market_state.mid_price,
                                  state.inventory.quantity, 
@@ -218,25 +321,62 @@ impl MarketMaker{
 
                                 let (bid_size , ask_size) = state.compute_quote_sizes();
         
-                                // need to find sizes , form quotes , cancel all pending orders 
-                                // SEND CANCEL ORDER Commands for pending orders 
-                                let _ = self.order_queue.enqueue(Order{
+                               
+                                for pending_orders in &mut state.pending_orders{
+                                    match pending_orders.exchange_order_id{
+                                        Some(order_id)=>{
+                                            let _ = self.order_queue.enqueue(MmOrder { 
+                                                client_id : pending_orders.mm_client_id,
+                                                order_id, 
+                                                price: 0, 
+                                                timestamp: 0, 
+                                                shares_qty: 0, 
+                                                symbol: state.symbol, 
+                                                side: 0, 
+                                                order_type: 1, 
+                                                status: 0 
+                                            });
+                                        }
+                                        None=>{}
+                                    }
+                                }
+
+                                let _ = self.order_queue.enqueue(MmOrder{
+                                    client_id : ask_client_id,
+                                    order_id : 0 ,
                                     price : ask_price.to_u64().unwrap() ,
                                     timestamp : 0 , 
                                     shares_qty : ask_size as u32 ,
                                     symbol : state.symbol ,
                                     side : 1 ,
-                                    status : 0 
+                                    status : 0 ,
+                                    order_type : 0
                                 });
 
-                                let _ = self.order_queue.enqueue(Order{
+                                let _ = self.order_queue.enqueue(MmOrder{
+                                    client_id : bid_client_id, 
+                                    order_id : 0 ,
                                     price : bid_price.to_u64().unwrap() ,
                                     timestamp : 0 , 
                                     shares_qty : bid_size as u32 ,
                                     symbol : state.symbol ,
                                     side : 0 ,
-                                    status : 0 
+                                    status : 0 ,
+                                    order_type : 0 
                                 });
+
+                                // now add theese to the pending orders list , the order id that we will be returned by the API 
+                               // state.pending_orders.push();
+                               state.pending_orders.push(PendingState { 
+                                    exchange_order_id: None, 
+                                    mm_client_id: ask_client_id 
+                                });
+                                state.pending_orders.push(PendingState { 
+                                    exchange_order_id: None, 
+                                    mm_client_id: bid_client_id 
+                                });
+                               state.last_quoted = Instant::now();
+
 
                             }
                         }

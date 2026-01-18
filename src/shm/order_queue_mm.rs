@@ -28,7 +28,7 @@ pub struct MmOrder{
    // pub user_id : u64 , always 0 
     pub shares_qty: u32,
     pub symbol: u32,
-    pub side: u8,   // 0=buy, 1=sell
+    pub side: u8,   // 0=bid, 1=ask
     pub order_type : u8,   // 0 -> post order , 1->cancel order 
     pub status: u8, // 0=pending, 1=filled, 2=rejected
 }
