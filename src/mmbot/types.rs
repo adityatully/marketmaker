@@ -70,3 +70,8 @@ pub struct PendingOrder{
     pub level_number: usize,  // Which level in the ladder (0-9)
 }
 
+
+
+pub enum MmError{
+    SymbolNotFound 
+}

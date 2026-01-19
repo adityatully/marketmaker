@@ -1,7 +1,7 @@
-use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MarketState, PnL}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
+use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MMError, MarketState, PnL}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Duration, Instant}};
-use crate::{mmbot::{types::SymbolOrders, rolling_price::RollingPrice, types::QuotingMode}, shm::{feed_queue_mm::MarketMakerFeedQueue, fill_queue_mm::MarketMakerFillQueue, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::MessageFromApiQueue}};
+use crate::{mmbot::{rolling_price::RollingPrice, types::{MmError, QuotingMode, SymbolOrders}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::MessageFromApiQueue}};
 use rust_decimal::prelude::ToPrimitive;
 
 
@@ -50,6 +50,8 @@ pub struct SymbolState{
 
     // keeping model constants per symbol , an auto adjusting formula needs to be developed to modify these 
     // according to market conditions
+
+    // add certain paramteres to seeee the boot strapppingggggg 
 
 }
 
@@ -181,10 +183,6 @@ pub struct MarketMaker{
     pub is_bootstrapped: bool,
 
    
-
-    
-
-
     // quoting engine 
     pub current_mode : QuotingMode
    
@@ -209,7 +207,7 @@ impl MarketMaker{
             eprint!("fai;ed to open message queue");
         }
         Self { 
-            symbol_orders : FxHashMap::with_capacity_and_hasher(1_000_000, Default::default()),
+            symbol_orders : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default()),
             order_queue : order_queue.unwrap(),
             fill_queue : fill_queue.unwrap(),
             feed_queue : feed_queue.unwrap(),
@@ -217,9 +215,117 @@ impl MarketMaker{
             volitality_estimator: VolatilityEstimator::new() , 
             is_bootstrapped : false , 
             total_volume : 0 , 
-            symbol_states : FxHashMap::with_capacity_and_hasher(1_000_000, Default::default()),
+            symbol_states : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default()),
             current_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 }
-          
+        }
+    }
+
+    pub fn update_state_from_feed(&mut self , market_feed : MarketMakerFeed)->Result<() , MmError>{
+        let symbol = market_feed.symbol;
+        match self.symbol_states.get_mut(&symbol) {
+            Some(symbol_state)=>{
+                symbol_state.best_ask = Decimal::from(market_feed.best_ask);
+                symbol_state.best_bid = Decimal::from(market_feed.best_bid);
+                symbol_state.best_ask_qty = market_feed.best_ask_qty;
+                symbol_state.best_bid_qty = market_feed.best_bid_qty;
+
+                symbol_state.market_state.mid_price = (symbol_state.best_ask + symbol_state.best_bid)/dec!(2);
+                // mid price changed so the unrelaised pnl aslo changes 
+                if symbol_state.inventory.quantity != dec!(0){
+                    let new_unrealised = (symbol_state.market_state.mid_price - symbol_state.inventory.avg_entry_price)*symbol_state.inventory.quantity;
+                    symbol_state.pnl.update(symbol_state.pnl.realized, new_unrealised);
+                }
+            }
+            None =>{
+                return Err(MmError::SymbolNotFound);
+            }
+        }   
+        Ok(())
+    }
+
+    pub fn update_inventory_from_fill(&mut self , market_fill : MarketMakerFill)->Result<() , MmError>{
+        let symbol = market_fill.symbol;
+        let fill_qty = Decimal::from(market_fill.fill_quantity);
+        let fill_price = Decimal::from(market_fill.fill_price);
+        match market_fill.side_of_mm_order{
+            0 =>{
+                 // market maker order was a buy (bid order)
+                
+                match self.symbol_states.get_mut(&symbol){
+                    Some(symbol_state)=>{
+                        let old_qty = symbol_state.inventory.quantity;
+                        let old_avg = symbol_state.inventory.avg_entry_price;
+                        symbol_state.inventory.quantity += fill_qty;
+
+                        if symbol_state.inventory.quantity > dec!(0) {
+                            symbol_state.inventory.avg_entry_price = 
+                                (old_qty * old_avg + fill_qty * fill_price) 
+                                / symbol_state.inventory.quantity;
+                        }
+
+                        //if it was a buy we got more shares , so the realised PNL wont change bcs we dint sold 
+                        // unrealised PNL will 
+                        let new_realised = symbol_state.pnl.realized;
+                        let new_unrealised = (symbol_state.market_state.mid_price - symbol_state.inventory.avg_entry_price)*symbol_state.inventory.quantity;
+
+
+                        symbol_state.pnl.update(new_realised, new_unrealised);
+                    }
+                    None =>{
+                        return Err(MmError::SymbolNotFound);
+                    }
+                }
+            }
+            1 =>{
+                // update PNL 
+                match self.symbol_states.get_mut(&symbol){
+                    Some(symbol_state)=>{
+                       // let old_qty = symbol_state.inventory.quantity;
+                        let old_realised = symbol_state.pnl.realized;
+                     //   let old_unrealised = symbol_state.pnl.unrealized;
+
+                        // actual PNL that took place from the bid ask spread 
+                        let realized_pnl_from_sale = (fill_price - symbol_state.inventory.avg_entry_price) * fill_qty;
+
+                        symbol_state.inventory.quantity -= fill_qty;
+
+                        let new_realized = old_realised + realized_pnl_from_sale;
+
+                        let new_unrealized = if symbol_state.inventory.quantity != dec!(0) {
+                            (symbol_state.market_state.mid_price - symbol_state.inventory.avg_entry_price) * symbol_state.inventory.quantity
+                        } else {
+                            dec!(0)  // No position = no unrealized P&L
+                        };
+
+                        symbol_state.pnl.update(new_realized, new_unrealized);
+                    
+                    }
+                    None=>{
+                        return Err(MmError::SymbolNotFound);
+                    }
+                }
+            }   
+            _ =>{
+
+            }
+        }
+        Ok(())
+    }
+
+    pub fn run_market_maker(&mut self ){
+        loop{
+            // first we co nsume the feed from the engine 
+            while let  Ok(Some(feed)) = self.feed_queue.dequeue(){
+                // update the feed for that symbol 
+                let _ = self.update_state_from_feed(feed);
+            }
+
+            // now needing to process fills 
+            while let Ok(Some(fill)) = self.fill_queue.dequeue(){
+                // state(inventory ) shud change , order manager change 
+                let _= self.update_inventory_from_fill(fill);
+                
+            }
         }
     }
 
