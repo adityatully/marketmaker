@@ -43,6 +43,18 @@ pub struct SymbolOrders {
 }
 
 
+impl SymbolOrders{
+    pub fn new(symbol : u32)->Self{
+        Self { 
+            symbol, 
+            pending_orders: Vec::new(), 
+            next_client_id: 1, 
+            last_quote_time: Instant::now() 
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Side {
     BID = 0 ,
@@ -72,6 +84,15 @@ pub struct PendingOrder{
 
 
 
+#[derive(Debug)]
 pub enum MmError{
-    SymbolNotFound 
+    SymbolNotFound ,
+    ClienIdNotFound
+}
+
+
+
+pub enum InventorySatus{
+    LONG ,
+    SHORT
 }

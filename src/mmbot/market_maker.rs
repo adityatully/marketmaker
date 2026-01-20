@@ -1,8 +1,9 @@
 use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MMError, MarketState, PnL}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Duration, Instant}};
-use crate::{mmbot::{rolling_price::RollingPrice, types::{MmError, QuotingMode, SymbolOrders}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::MessageFromApiQueue}};
+use crate::{mmbot::{rolling_price::RollingPrice, types::{InventorySatus, MmError, QuotingMode, SymbolOrders}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::{MessageFromApi, MessageFromApiQueue}}};
 use rust_decimal::prelude::ToPrimitive;
+use crate::mmbot::types::OrderState;
 
 
 //use std::time::Instant;
@@ -179,12 +180,11 @@ pub struct MarketMaker{
 
     // Bootstrap tracking
     pub total_volume: u64,
-    pub is_bootstrapped: bool,
+    pub is_bootstrapped: bool, // we are keepig record of inventoy and PNL per symbol , so is bootstap shud also be per symbol 
 
    
-    // quoting engine 
+    // quoting engine , currrent mode shud also be per symbol 
     pub current_mode : QuotingMode
-   
 }
 
 impl MarketMaker{
@@ -234,6 +234,8 @@ impl MarketMaker{
                     let new_unrealised = (symbol_state.market_state.mid_price - symbol_state.inventory.avg_entry_price)*symbol_state.inventory.quantity;
                     symbol_state.pnl.update(symbol_state.pnl.realized, new_unrealised);
                 }
+
+                // bootstrappijg per symbol 
             }
             None =>{
                 return Err(MmError::SymbolNotFound);
@@ -345,6 +347,43 @@ impl MarketMaker{
         Ok(())
     }
 
+    pub fn get_inventory_status(&mut self , symbol : u32)->Result<InventorySatus , MmError>{
+        match self.symbol_states.get_mut(&symbol){
+            Some(symbol_state)=>{
+                if symbol_state.inventory.quantity > dec!(0){
+                    Ok(InventorySatus::LONG)
+                }
+                else{
+                    Ok(InventorySatus::SHORT)
+                }
+            }
+
+            None=>{
+                return Err(MmError::SymbolNotFound);
+            }
+        }
+    }
+
+    pub fn handle_order_acceptance(&mut self  , api_response : MessageFromApi)->Result<() , MmError>{
+        let symbol = api_response.symbol;
+        match self.symbol_orders.get_mut(&symbol){
+            Some(symbol_orders)=>{
+                if let Some(order) = symbol_orders.pending_orders.iter_mut().find(
+                    |pending_order|
+                    pending_order.client_id == api_response.client_id
+
+                ){
+                    order.exchange_order_id = Some(api_response.order_id);
+                    order.state = OrderState::Active;
+                }
+            }
+            None=>{
+                return Err(MmError::SymbolNotFound);
+            }
+        }
+        Ok(())
+    }
+
     pub fn run_market_maker(&mut self ){
         loop{
             // first we co nsume the feed from the engine 
@@ -360,6 +399,30 @@ impl MarketMaker{
                 // order manager update 
                 let _ = self.order_manager_update_after_fill(fill);
             }
+
+
+            while let Ok(Some(api_message)) = self.message_queue.dequeue(){
+                let symbol = api_message.symbol;
+                match api_message.message_type{
+                    0 =>{
+                        // adding thr symbol 
+                        self.symbol_states.insert(symbol, SymbolState::new(Decimal::from(api_message.ipo_price), symbol));
+                        self.symbol_orders.insert(symbol, SymbolOrders::new(symbol));
+                    }
+                    1 =>{
+                        // order accepted ack
+                        self.handle_order_acceptance(api_message).expect("coulndt handle the order acceptance ");
+                    }
+                    2=>{
+                        // cancale ordr ack
+                        
+                    }
+                    _=>{
+
+                    }
+                }
+            }
+
         }
     }
 
