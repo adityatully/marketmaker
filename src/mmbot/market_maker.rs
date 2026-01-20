@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Duration, Instant}};
 use crate::{mmbot::{rolling_price::RollingPrice, types::{InventorySatus, MmError, QuotingMode, SymbolOrders}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder}, response_queue_mm::{MessageFromApi, MessageFromApiQueue}}};
 use rust_decimal::prelude::ToPrimitive;
-use crate::mmbot::types::OrderState;
+use crate::mmbot::types::{OrderState , ApiMessageType};
 
 
 //use std::time::Instant;
@@ -54,6 +54,10 @@ pub struct SymbolState{
 
     // add certain paramteres to seeee the boot strapppingggggg 
 
+    // Bootstrap tracking
+    pub total_volume: u64,
+    pub is_bootstrapped: bool,
+    pub current_mode : QuotingMode
 }
 // each symbol state shud have a defualt inventory for init (ik)
 impl SymbolState{
@@ -66,7 +70,7 @@ impl SymbolState{
             best_ask_qty : 0 , 
             best_bid_qty : 0 ,
             market_state : MarketState { mid_price: ipo_price, volatility: dec!(0), timestamp: 0 } ,
-            rolling_prices : RollingPrice { deque: VecDeque::new(), capacity: 0 } ,
+            rolling_prices : RollingPrice { deque: VecDeque::with_capacity(100), capacity: 100 } ,
             inventory : InventoryPosition::new() ,
             pnl : PnL::new(),
             last_sample_time : Instant::now() ,
@@ -74,9 +78,13 @@ impl SymbolState{
             risk_aversion :dec!(0) , // decide ,,
             time_to_terminal : 0 , // decide 
             liquidity_k : dec!(0) , // decide , 
+            total_volume : 0 , 
+            is_bootstrapped : false , 
+            current_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 }
         }
         // find the sollutiton for the best bid and the best ask value at cold start 
     }
+
     pub fn compute_quote_sizes(
         &self,
     ) -> (u64, u64) {
@@ -178,13 +186,8 @@ pub struct MarketMaker{
     pub symbol_orders: FxHashMap<u32, SymbolOrders>,
 
 
-    // Bootstrap tracking
-    pub total_volume: u64,
-    pub is_bootstrapped: bool, // we are keepig record of inventoy and PNL per symbol , so is bootstap shud also be per symbol 
-
-   
     // quoting engine , currrent mode shud also be per symbol 
-    pub current_mode : QuotingMode
+  
 }
 
 impl MarketMaker{
@@ -212,13 +215,10 @@ impl MarketMaker{
             feed_queue : feed_queue.unwrap(),
             message_queue : message_from_api_queueu.unwrap(),
             volitality_estimator: VolatilityEstimator::new() , 
-            is_bootstrapped : false , 
-            total_volume : 0 , 
-            symbol_states : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default()),
-            current_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 }
+            symbol_states : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default())
         }
     }
-
+    #[inline(always)]
     pub fn update_state_from_feed(&mut self , market_feed : MarketMakerFeed)->Result<() , MmError>{
         let symbol = market_feed.symbol;
         match self.symbol_states.get_mut(&symbol) {
@@ -243,7 +243,7 @@ impl MarketMaker{
         }   
         Ok(())
     }
-
+    #[inline(always)]
     pub fn update_inventory_from_fill(&mut self , market_fill : MarketMakerFill)->Result<() , MmError>{
         let symbol = market_fill.symbol;
         let fill_qty = Decimal::from(market_fill.fill_quantity);
@@ -313,6 +313,7 @@ impl MarketMaker{
         Ok(())
     }
 
+    #[inline(always)]
     pub fn order_manager_update_after_fill(&mut self , market_fill : MarketMakerFill)->Result<() , MmError>{
         let symbol = market_fill.symbol; 
         match self.symbol_orders.get_mut(&symbol){
@@ -351,10 +352,10 @@ impl MarketMaker{
         match self.symbol_states.get_mut(&symbol){
             Some(symbol_state)=>{
                 if symbol_state.inventory.quantity > dec!(0){
-                    Ok(InventorySatus::LONG)
+                    Ok(InventorySatus::Long)
                 }
                 else{
-                    Ok(InventorySatus::SHORT)
+                    Ok(InventorySatus::Short)
                 }
             }
 
@@ -363,7 +364,7 @@ impl MarketMaker{
             }
         }
     }
-
+    #[inline(always)]
     pub fn handle_order_acceptance_ack(&mut self  , api_response : MessageFromApi)->Result<() , MmError>{
         let symbol = api_response.symbol;
         match self.symbol_orders.get_mut(&symbol){
@@ -383,7 +384,7 @@ impl MarketMaker{
         }
         Ok(())
     }
-
+    #[inline(always)]
     pub fn handle_order_cancel_ack(&mut self, api_response : MessageFromApi)->Result<() , MmError>{
         let symbol = api_response.symbol;
         match self.symbol_orders.get_mut(&symbol){
@@ -396,6 +397,8 @@ impl MarketMaker{
         }
         Ok(())
     }
+
+    
 
     pub fn run_market_maker(&mut self ){
         loop{
@@ -433,6 +436,24 @@ impl MarketMaker{
                     _=>{
 
                     }
+                }
+            }
+
+
+            // updating the steate loop
+            for (symbol , state) in self.symbol_states.iter_mut(){
+                if state.last_sample_time.elapsed() >= SAMPLE_GAP{
+                    state.rolling_prices.push(state.market_state.mid_price);
+                    state.last_sample_time = Instant::now();
+                }
+
+                if state.last_volatility_calc.elapsed() >= VOLITILTY_CALC_GAP{
+                    let new_vol = self.volitality_estimator.calculate_simple(state.rolling_prices.as_slice_for_volatility());
+                    if new_vol.is_err(){
+                        eprint!("error in volatility calc");
+                    }
+                    state.market_state.volatility = new_vol.unwrap();
+                    state.last_volatility_calc = Instant::now();
                 }
             }
 

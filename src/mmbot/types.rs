@@ -93,6 +93,12 @@ pub enum MmError{
 
 
 pub enum InventorySatus{
-    LONG ,
-    SHORT
+    Long ,
+    Short
+}
+
+pub enum ApiMessageType{
+    AddSymbolMessage = 0 , 
+    OrderAcceptedAck = 1 ,
+    OrderCancelledAck = 2 ,
 }
