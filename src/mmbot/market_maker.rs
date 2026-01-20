@@ -364,7 +364,7 @@ impl MarketMaker{
         }
     }
 
-    pub fn handle_order_acceptance(&mut self  , api_response : MessageFromApi)->Result<() , MmError>{
+    pub fn handle_order_acceptance_ack(&mut self  , api_response : MessageFromApi)->Result<() , MmError>{
         let symbol = api_response.symbol;
         match self.symbol_orders.get_mut(&symbol){
             Some(symbol_orders)=>{
@@ -376,6 +376,19 @@ impl MarketMaker{
                     order.exchange_order_id = Some(api_response.order_id);
                     order.state = OrderState::Active;
                 }
+            }
+            None=>{
+                return Err(MmError::SymbolNotFound);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn handle_order_cancel_ack(&mut self, api_response : MessageFromApi)->Result<() , MmError>{
+        let symbol = api_response.symbol;
+        match self.symbol_orders.get_mut(&symbol){
+            Some(symbol_orders)=>{
+                symbol_orders.pending_orders.retain(|order| order.exchange_order_id != Some(api_response.order_id) );
             }
             None=>{
                 return Err(MmError::SymbolNotFound);
@@ -411,11 +424,11 @@ impl MarketMaker{
                     }
                     1 =>{
                         // order accepted ack
-                        self.handle_order_acceptance(api_message).expect("coulndt handle the order acceptance ");
+                        self.handle_order_acceptance_ack(api_message).expect("coulndt handle the order acceptance ");
                     }
                     2=>{
                         // cancale ordr ack
-                        
+                        self.handle_order_cancel_ack(api_message).expect("coundt handle the order cancellation ack ")
                     }
                     _=>{
 
