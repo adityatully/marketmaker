@@ -1,7 +1,7 @@
-use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MMError, MarketState, PenaltyFunction, PnL}, strategy::avellaneda_stoikov::calculate_optimal_quotes};
+use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, prelude::{InventoryPosition, MMError, MarketState, PenaltyFunction, PnL}, strategy::{avellaneda_stoikov::calculate_optimal_quotes, interface::AvellanedaStoikov, quote}};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, os::macos::raw::stat, time::{Duration, Instant}};
-use crate::{mmbot::{rolling_price::RollingPrice, types::{CancelData, DepthUpdate, InventorySatus, MmError, QuotingMode, SymbolOrders}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, response_queue_mm::{MessageFromApi, MessageFromApiQueue}}};
+use crate::{mmbot::{rolling_price::RollingPrice, types::{CancelData, DepthUpdate, InventorySatus, MmError, QuotingMode, SymbolOrders, TargetLadder, TargetQuotes}}, shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, response_queue_mm::{MessageFromApi, MessageFromApiQueue}}};
 use rust_decimal::prelude::ToPrimitive;
 use crate::mmbot::types::{OrderState , ApiMessageType , Side , PendingOrder};
 
@@ -13,7 +13,7 @@ const VOLITILTY_CALC_GAP  : Duration = Duration::from_millis(100);
 const QUOTING_GAP : Duration = Duration::from_millis(200);
 const CYCLE_GAP : Duration = Duration::from_millis(250);
 const TARGET_INVENTORY : Decimal = dec!(0); 
-const MAX_SIZE : Decimal = dec!(50) ; 
+const MAX_SIZE_FOR_ORDER : Decimal = dec!(100) ; 
 const INVENTORY_CAP :Decimal = dec!(1000);
 const MAX_BOOK_MULT : Decimal = dec!(2);
 
@@ -113,7 +113,7 @@ impl SymbolState{
         &self,
     ) -> (u64, u64) {
        
-        if INVENTORY_CAP <= dec!(0) || MAX_SIZE == dec!(0) {
+        if INVENTORY_CAP <= dec!(0) || MAX_SIZE_FOR_ORDER == dec!(0) {
             return (0, 0);
         }
 
@@ -132,7 +132,7 @@ impl SymbolState{
         let vol_factor_f = vol_factor.to_f64().unwrap_or(0.1);
 
        
-        let mut base = (MAX_SIZE.to_f64().unwrap_or(50.0) * vol_factor_f).round() as i64;
+        let mut base = (MAX_SIZE_FOR_ORDER.to_f64().unwrap_or(50.0) * vol_factor_f).round() as i64;
         base = base.max(1);
 
         
@@ -164,7 +164,7 @@ impl SymbolState{
         }
 
       
-        let max_size_i64 = MAX_SIZE.to_i64().unwrap_or(50);
+        let max_size_i64 = MAX_SIZE_FOR_ORDER.to_i64().unwrap_or(50);
         bid_size = bid_size.clamp(0, max_size_i64);
         ask_size = ask_size.clamp(0, max_size_i64);
 
@@ -397,7 +397,7 @@ impl SymbolContext{
         }
     }
 
-    pub fn should_requote(&self, symbol: u32) -> bool {
+    pub fn should_requote(&self) -> bool {
 
 
         // dont quote again in emergency mode 
@@ -409,6 +409,11 @@ impl SymbolContext{
         // nit enough time passed 
         if self.orders.last_quote_time.elapsed() < QUOTING_GAP {
             return false;
+        }
+
+        // mode chNged 
+        if self.state.current_mode != self.state.prev_mode {
+            return true;
         }
         
         // getting active orders
@@ -471,10 +476,256 @@ impl SymbolContext{
                 return false;
             }
         }
-        
+
+
+        let mid_move = (self.state.market_state.mid_price - self.state.prev_mid_price).abs();
+
+        // your tick-size logic can go here, for now do % threshold
+        let mid_move_pct = if self.state.prev_mid_price != dec!(0) {
+            (mid_move / self.state.prev_mid_price).to_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+         // 0.05% mid drift triggers requote (tune this)
+        if mid_move_pct >= 0.0005 {
+            return true;
+        }
+
         // default dont 
         false
     }
+
+
+    pub fn compute_target_ladder(&self)->Result<TargetLadder , MmError>{
+        match self.state.current_mode{
+            QuotingMode::Emergency =>{
+                Ok(TargetLadder {
+                    bids: Vec::new(),
+                    asks: Vec::new(),
+                })
+            }
+
+            QuotingMode::Bootstrap { spread_pct, levels } => {
+                self.build_bootstrap_ladder(spread_pct, levels)
+            }
+            
+            QuotingMode::Normal { levels, size_decay } => {
+                self.build_normal_ladder( levels, size_decay)
+            }
+            
+            QuotingMode::Stressed { spread_mult, levels } => {
+                self.build_stressed_ladder(spread_mult, levels)
+            }
+            
+            QuotingMode::InventoryCapped { side, levels } => {
+                self.build_capped_ladder(side, levels)
+            }
+        }
+       
+    }
+
+
+    pub fn build_bootstrap_ladder(&self , spread_pct : Decimal , levels:usize)->Result<TargetLadder , MmError>{
+        const TICK_SIZE: Decimal = dec!(0.25); // configure 
+        const BASE_SIZE: u64 = 100; // configure 
+        
+        let half_spread = self.state.ipo_price * spread_pct / dec!(2);
+        let center_bid = self.state.ipo_price - half_spread;
+        let center_ask = self.state.ipo_price + half_spread;
+        
+        let mut bids = Vec::with_capacity(levels);
+        let mut asks = Vec::with_capacity(levels);
+        
+        for i in 0..levels {
+            let offset = TICK_SIZE * Decimal::from(i);
+            let size = (BASE_SIZE as f64 * 0.85_f64.powi(i as i32)) as u64;
+            
+            bids.push(TargetQuotes {
+                price: center_bid - offset,
+                qty: size.max(10) as u32,
+                side: Side::BID,
+                level : i 
+                
+            });
+            
+            asks.push(TargetQuotes {
+                price: center_ask + offset,
+                qty: size.max(10) as u32,
+                side: Side::ASK,
+                level : i 
+            });
+        }
+        
+        Ok(TargetLadder { bids, asks })
+    }
+
+    pub fn build_normal_ladder(&self , levels : usize , size_decay : f64)->Result<TargetLadder , MmError>{
+        const TICK_SIZE: Decimal = dec!(0.25); 
+        match calculate_optimal_quotes(
+            self.state.market_state.mid_price, 
+            self.state.inventory.quantity, 
+            self.state.risk_aversion,
+            self.state.market_state.volatility,
+            self.state.time_to_terminal,
+            self.state.liquidity_k
+        ){
+            Ok(quotes)=>{
+                // optimal bid price and the optimal ask price 
+                let (bid_size , ask_size) = self.state.compute_quote_sizes();
+
+                let mut bids = Vec::with_capacity(levels);
+                let mut asks = Vec::with_capacity(levels);
+
+
+                for i in 0..levels {
+                    let offset = TICK_SIZE * Decimal::from(i);
+                    let bid_size = (bid_size as f64 * size_decay.powi(i as i32)) as u64;
+                    let ask_size = (ask_size as f64 * size_decay.powi(i as i32)) as u64;
+
+                    bids.push(TargetQuotes {
+                        price: quotes.0 - offset,
+                        qty: bid_size.max(10) as u32,
+                        side: Side::BID,
+                        level : i 
+
+                    });
+
+                    asks.push(TargetQuotes {
+                        price: quotes.1 + offset,
+                        qty: ask_size.max(10) as u32,
+                        side: Side::ASK,
+                        level : i
+                    });
+                }
+
+                Ok(TargetLadder { bids, asks })
+            }
+            Err(_)=>{
+                return Err(MmError::CouldNotCalculateQuotes);
+            }
+        }
+        
+
+        
+
+            
+    }
+
+    pub fn build_stressed_ladder(&self , spread_mult : Decimal , levels : usize)->Result<TargetLadder , MmError>{
+        const TICK_SIZE: Decimal = dec!(0.25);
+        const BASE_SIZE: u64 = 50;
+
+        match calculate_optimal_quotes(
+            self.state.market_state.mid_price, 
+            self.state.inventory.quantity, 
+            self.state.risk_aversion,
+            self.state.market_state.volatility,
+            self.state.time_to_terminal,
+            self.state.liquidity_k
+        ){
+            Ok(quotes)=>{
+                let center_bid = quotes.0;
+                let center_ask = quotes.1;
+
+                let current_spread = center_ask - center_bid;
+                let extra_spread = current_spread * (spread_mult - dec!(1)) / dec!(2);
+                
+                let new_bid = center_bid - extra_spread;
+                let new_ask = center_ask + extra_spread;
+                
+                let mut bids = Vec::with_capacity(levels);
+                let mut asks = Vec::with_capacity(levels);
+                
+                for i in 0..levels {
+                    let offset = TICK_SIZE * Decimal::from(i);
+                    let size = (BASE_SIZE as f64 * 0.80_f64.powi(i as i32)) as u64;
+                    
+                    bids.push(TargetQuotes {
+                        price: new_bid - offset,
+                        qty: size.max(10) as u32,
+                        side: Side::BID,
+                        level : i 
+                    });
+                    
+                    
+                    asks.push(TargetQuotes {
+                        price: new_ask + offset,
+                        qty: size.max(10) as u32,
+                        side: Side::ASK,
+                        level : i 
+                    });
+                }
+                
+                Ok(TargetLadder { bids, asks })
+            }
+            Err(_)=>{
+                return Err(MmError::CouldNotCalculateQuotes);
+            }
+        }
+    }
+
+    pub fn build_capped_ladder(&self , side : InventorySatus ,levels : usize)->Result<TargetLadder , MmError>{
+        const TICK_SIZE: Decimal = dec!(0.25);
+        const BASE_SIZE: u64 = 150; 
+        match calculate_optimal_quotes(
+            self.state.market_state.mid_price, 
+            self.state.inventory.quantity, 
+            self.state.risk_aversion,
+            self.state.market_state.volatility,
+            self.state.time_to_terminal,
+            self.state.liquidity_k
+        ){
+            Ok(quotes)=>{
+                let center_bid = quotes.0;
+                let center_ask = quotes.1;
+
+
+                let mut bids = Vec::new();
+                let mut asks = Vec::new();
+
+                match side {
+                    InventorySatus::Long => {
+                        // Only asks (to sell)
+                        for i in 0..levels {
+                            let offset = TICK_SIZE * Decimal::from(i);
+                            let size = (BASE_SIZE as f64 * 0.90_f64.powi(i as i32)) as u64;
+                            
+                            asks.push(TargetQuotes {
+                                price: center_ask + offset,
+                                qty: size.max(10) as u32,
+                                side: Side::ASK,
+                                level :  i 
+                            });
+                        }
+                    }
+                    
+                    InventorySatus::Short => {
+                        // Only bids (to buy)
+                        for i in 0..levels {
+                            let offset = TICK_SIZE * Decimal::from(i);
+                            let size = (BASE_SIZE as f64 * 0.90_f64.powi(i as i32)) as u64;
+                            
+                            bids.push(TargetQuotes {
+                                price: center_bid - offset,
+                                qty: size.max(10) as u32,
+                                side: Side::BID,
+                                level : i 
+                            });
+                        }
+                    }
+                }
+
+                Ok(TargetLadder { bids, asks })
+        
+            }
+
+            Err(_)=>{
+                return Err(MmError::CouldNotCalculateQuotes);
+            }
+        }
+    }
+
 }
 
 pub struct MarketMaker{
@@ -1022,6 +1273,14 @@ impl MarketMaker{
                     }
 
                     let _ = ctx.state.determine_mode(); // no need to return , just update the mode 
+
+
+                    if ctx.should_requote(){
+                        // we compute target laders and try to modify them 
+                    }
+
+
+
 
 
                 }

@@ -7,35 +7,22 @@ use rust_decimal::Decimal;
 #[derive(Debug, Clone, PartialEq , Copy)]
 pub enum QuotingMode {
     Bootstrap {
-        spread_pct: Decimal,     // 2% wide spread
-        levels: usize,           // 5 levels
+        spread_pct: Decimal,     // 2% wide spread   // spread pct wrt to the mid price confgirue 5 for now 
+        levels: usize,           // 5 levels configure ..
     },
     Normal {
-        levels: usize,           // 10 levels
-        size_decay: f64,         // 0.85 exponential decay
+        levels: usize,           // 10 levels  configure 
+        size_decay: f64,         // 0.85 exponential decay  // at each level 
     },
     Stressed {
-        spread_mult: Decimal,    // 2x wider spreads
+        spread_mult: Decimal,    // 2x wider spreads ..  
         levels: usize,           // 5 levels (reduce liquidity)
     },
     InventoryCapped {
         side: InventorySatus,     // Only bid or only ask
         levels: usize,           // 10 levels
     },
-
     Emergency
-
-}
-
-pub struct QuoteLadder {
-    pub bids: Vec<QuoteLevel>,
-    pub asks: Vec<QuoteLevel>,
-}
-
-pub struct QuoteLevel {
-    pub price: Decimal,
-    pub size: u64,
-    pub level_number: usize,  // 0 = closest to mid, 9 = farthest
 }
 
 
@@ -57,10 +44,16 @@ impl SymbolOrders{
             last_quote_time: Instant::now() 
         }
     }
+
+    pub fn alloc_client_id(&mut self) -> u64 {
+        let id = self.next_client_id;
+        self.next_client_id += 1;
+        id
+    }
 }
 
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq , Copy)]
 pub enum Side {
     BID = 0 ,
     ASK = 1 
@@ -84,8 +77,8 @@ pub struct PendingOrder{
     pub original_size: u32,
     pub remaining_size: u32,
     pub state: OrderState,
-    pub level_number: usize,  // Which level in the ladder (0-9)
-    pub created_at : Instant
+    pub level: usize,  // Which level in the ladder (0-9)
+    pub created_at : Instant ,
 }
 
 
@@ -93,7 +86,8 @@ pub struct PendingOrder{
 #[derive(Debug)]
 pub enum MmError{
     SymbolNotFound ,
-    ClienIdNotFound
+    ClienIdNotFound , 
+    CouldNotCalculateQuotes
 }
 
 
@@ -110,9 +104,6 @@ pub enum ApiMessageType{
 }
 
 
-
-
-
 pub struct DepthUpdate{
     pub old_best_bid : Decimal ,
     pub old_best_ask : Decimal ,
@@ -121,11 +112,24 @@ pub struct DepthUpdate{
 }
 
 
-
 #[derive(Debug , Clone, Copy)]
 pub struct CancelData{
     pub symbol : u32 , 
     pub client_id : u64 , 
     pub order_id  : Option<u64> 
 
+}
+
+
+#[derive(Debug , Clone, Copy)]
+pub struct TargetQuotes{
+    pub level : usize , 
+    pub side : Side ,
+    pub price  :  Decimal , 
+    pub qty : u32
+}
+
+pub struct TargetLadder {
+    pub bids : Vec<TargetQuotes> , 
+    pub asks : Vec<TargetQuotes>,
 }
