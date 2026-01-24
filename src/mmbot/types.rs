@@ -61,10 +61,11 @@ pub enum Side {
 
 #[derive(Debug, Clone, PartialEq , Copy)]
 pub enum OrderState {
-    PendingNew,
+    PendingNew, // send but ack not reicved 
     Active,
     PendingCancel,
     PartiallyFilled,
+    CompletelyFilled
 }
 
 
@@ -119,11 +120,14 @@ pub struct CancelData{
     pub order_id  : Option<u64> 
 }
 
+
+#[derive(Debug , Clone, Copy)]
 pub struct PostData{
     pub symbol : u32 ,
     pub price : Decimal , 
     pub qty   : u32 , 
-    pub side  : Side
+    pub side  : Side , 
+    pub level : usize 
 }
 
 
