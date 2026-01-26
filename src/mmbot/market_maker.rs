@@ -1,9 +1,8 @@
 use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimator, 
     prelude::{InventoryPosition, MarketState, PnL}, strategy::{avellaneda_stoikov::calculate_optimal_quotes}};
 use rustc_hash::FxHashMap;
-use std::{collections::VecDeque, time::{Duration, Instant}};
-use crate::{mmbot::{rolling_price::RollingPrice, 
-    types::{CancelData, InventorySatus, MmError, PostData, QuotingMode, SymbolOrders, TargetLadder, TargetQuotes}}, 
+use std::{collections::VecDeque, time::{Instant}};
+use crate::{mmbot::{constants::{MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP, MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL, MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED, MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP, MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL, MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED}, rolling_price::RollingPrice, types::{CancelData, InventorySatus, MmError, PostData, QuotingMode, QuotingModeForCancelTriggers, SymbolOrders, TargetLadder, TargetQuotes}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
     fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, 
     order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, 
@@ -72,6 +71,9 @@ pub struct SymbolState{
 
     pub current_mode : QuotingMode,
     pub prev_mode: QuotingMode,
+
+    pub current_mode_for_cancellation : QuotingModeForCancelTriggers , 
+    
 }
 // each symbol state shud have a defualt inventory for init (ik)
 impl SymbolState{
@@ -102,7 +104,8 @@ impl SymbolState{
             total_volume : 0 , 
             is_bootstrapped : false , 
             current_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 } ,
-            prev_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 }
+            prev_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 } ,
+            current_mode_for_cancellation : QuotingModeForCancelTriggers::Bootstrap
         }
         // find the sollutiton for the best bid and the best ask value at cold start 
     }
@@ -311,10 +314,13 @@ impl SymbolState{
         }
     }
 
-    pub fn should_cancel_unprofitable_order(& self , order : &PendingOrder , current_mid : Decimal , current_spread:Decimal)->bool{
+    pub fn should_cancel_unprofitable_order(&self , order : &PendingOrder , current_mid : Decimal , current_spread:Decimal)->bool{
         let distance_from_mid = (order.price - current_mid).abs();
         let distance_from_mid_in_ticks = distance_from_mid/TICK_SIZE;
 
+        // bestbid(highest buying price ) < midprice < best ask(lowest selling price )
+
+        // if a bid has price > mid , giving a price higher than the highest bid 
         if order.side == Side::BID && order.price > current_mid {
             return true; 
         }
@@ -322,16 +328,41 @@ impl SymbolState{
             return true; 
         }
         
-      
-        if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL {
-            return true;  
+
+        let current_spread_in_ticks = current_spread / TICK_SIZE;
+
+        match self.current_mode_for_cancellation{
+            QuotingModeForCancelTriggers::Bootstrap=>{
+                if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP {
+                    return true;  
+                }
+                
+                if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP {
+                    return true;  
+                }
+            }
+
+            QuotingModeForCancelTriggers::Normal=>{
+                if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL{
+                    return true;  
+                }
+                
+                if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL {
+                    return true;  
+                }
+            }
+
+            QuotingModeForCancelTriggers::Stressed=>{
+                if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED {
+                    return true;  
+                }
+                
+                if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED {
+                    return true;  
+                }
+            }
         }
         
-        let current_spread_in_ticks = current_spread / TICK_SIZE;
-    
-        if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS {
-            return true;  
-        }
         
         false  
     }
@@ -356,9 +387,6 @@ impl SymbolState{
         
         false
     }
-
-    
-    
 }
 
 pub struct SymbolContext{
@@ -478,7 +506,6 @@ impl SymbolContext{
 
         let mid_move = (self.state.market_state.mid_price - self.state.prev_mid_price).abs();
         let mid_move_ticks = mid_move/TICK_SIZE;
-        // your tick-size logic can go here, for now do % threshold
         //let mid_move_pct = if self.state.prev_mid_price != dec!(0) {
         //    (mid_move / self.state.prev_mid_price).to_f64().unwrap_or(0.0)
         //} else {
@@ -1115,7 +1142,9 @@ impl MarketMaker{
                 if order.state != OrderState::Active {
                     continue;
                 }
-                // cancellation when the price crosses 
+                // cancellation when there becomes no chance of matching 
+                // doing only urgent and instantanoues cancellations here , that definately need to be cancelled 
+                // the orders are crossing the market 
                 let should_cancel = match order.side {
                     Side::BID => order.price > symbol_context.state.market_state.mid_price,  // Bid above mid
                     Side::ASK => order.price < symbol_context.state.market_state.mid_price,  // Ask below mid
@@ -1128,10 +1157,7 @@ impl MarketMaker{
                         order.state = OrderState::PendingCancel;
                     }
                 }
-
-                // also need to cancel stale 
-
-            
+                // stale orders getting canclled before we requote 
             }
         }
 
@@ -1140,7 +1166,8 @@ impl MarketMaker{
 
         let current_spread = symbol_context.state.best_ask - symbol_context.state.best_bid;
         let spread_in_ticks = current_spread/TICK_SIZE;
-        if spread_in_ticks < dec!(2) {  
+
+        if spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS {  
             
             for order in &mut symbol_context.orders.pending_orders {
                 if order.state == OrderState::Active {
@@ -1264,15 +1291,16 @@ impl MarketMaker{
         Ok((bids , asks ))
     }
 
-    pub fn cancel_all_orders(&mut self , symbol : u32){
+    pub fn cancel_all_orders(&mut self , _ : u32){
 
     }
 
-    pub fn cancel_side(&mut self , symbol : u32){
+    pub fn cancel_side(&mut self , _ : u32){
 
     }
 
-    // mm looop
+    // market maker running looop
+
     pub fn run_market_maker(&mut self ){
         loop{
             // clear the two batches 

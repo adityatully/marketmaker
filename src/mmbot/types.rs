@@ -25,6 +25,12 @@ pub enum QuotingMode {
     Emergency
 }
 
+#[derive(Debug)]
+pub enum QuotingModeForCancelTriggers{
+    Bootstrap , 
+    Normal , 
+    Stressed
+}
 
 #[derive(Debug)]
 pub struct SymbolOrders {
