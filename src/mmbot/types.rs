@@ -6,31 +6,15 @@ use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, PartialEq , Copy)]
 pub enum QuotingMode {
-    Bootstrap {
-        spread_pct: Decimal,     // 2% wide spread   // spread pct wrt to the mid price confgirue 5 for now 
-        levels: usize,           // 5 levels configure ..
-    },
-    Normal {
-        levels: usize,           // 10 levels  configure 
-        size_decay: f64,         // 0.85 exponential decay  // at each level 
-    },
-    Stressed {
-        spread_mult: Decimal,    // 2x wider spreads ..  
-        levels: usize,           // 5 levels (reduce liquidity)
-    },
-    InventoryCapped {
-        side: InventorySatus,     // Only bid or only ask
-        levels: usize,           // 10 levels
-    },
+    Bootstrap ,
+    Normal ,
+    Stressed ,
+    InventoryCapped  {
+        side : InventorySatus
+    } ,
     Emergency
 }
 
-#[derive(Debug)]
-pub enum QuotingModeForCancelTriggers{
-    Bootstrap , 
-    Normal , 
-    Stressed
-}
 
 #[derive(Debug)]
 pub struct SymbolOrders {

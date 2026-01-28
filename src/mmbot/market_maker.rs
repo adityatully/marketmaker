@@ -2,7 +2,9 @@ use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimato
     prelude::{InventoryPosition, MarketState, PnL}, strategy::{avellaneda_stoikov::calculate_optimal_quotes}};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Instant}};
-use crate::{mmbot::{constants::{MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP, MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL, MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED, MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP, MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL, MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED}, rolling_price::RollingPrice, types::{CancelData, InventorySatus, MmError, PostData, QuotingMode, QuotingModeForCancelTriggers, SymbolOrders, TargetLadder, TargetQuotes}}, 
+use crate::{mmbot::{constants::{
+    BOOTSTRAP_LEVELS, BOOTSTRAP_SPREAD_PCT, CAPPED_LEVELS, MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP, MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL, MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED, MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP, MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL, MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED, MIN_SAMPLES_TO_EXIT_BOOTSTRAP, MIN_TRADES_TO_EXIT_BOOTSTRAP, MIN_VOLUME_TO_EXIT_BOOTSTRAP, NORMAL_LEVELS, NORMAL_SIZE_DECAY, STRESSED_LEVELS, STRESSED_SPREAD_MULT}, rolling_price::RollingPrice, 
+    types::{CancelData, InventorySatus, MmError, PostData, QuotingMode, SymbolOrders, TargetLadder, TargetQuotes}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
     fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, 
     order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, 
@@ -11,7 +13,7 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::mmbot::types::{OrderState  , Side , PendingOrder};
 use crate::mmbot::constants::{SAMPLE_GAP , MAX_SYMBOLS , VOLITILTY_CALC_GAP , 
     QUOTING_GAP , MANAGEMENT_CYCLE_GAP , TARGET_INVENTORY , MAX_SIZE_FOR_ORDER , INVENTORY_CAP , MAX_BOOK_MULT , 
-    TICK_SIZE , MAX_DISTANCE_IN_TICKS_TO_CANCEL , MIN_PROFITABLE_SPREAD_IN_TICKS , INVENTORY_CANCELLATION_TRIGGER_AMNT ,
+    TICK_SIZE  , MIN_PROFITABLE_SPREAD_IN_TICKS , INVENTORY_CANCELLATION_TRIGGER_AMNT ,
     MAX_ORDER_AGE , MAX_ALLOWED_NEG_TOTAL_PNL , MAX_ALLOWED_NEG_REALISED_PNL
 }; 
 
@@ -71,8 +73,6 @@ pub struct SymbolState{
 
     pub current_mode : QuotingMode,
     pub prev_mode: QuotingMode,
-
-    pub current_mode_for_cancellation : QuotingModeForCancelTriggers , 
     
 }
 // each symbol state shud have a defualt inventory for init (ik)
@@ -103,9 +103,9 @@ impl SymbolState{
             total_trades : 0 , 
             total_volume : 0 , 
             is_bootstrapped : false , 
-            current_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 } ,
-            prev_mode : QuotingMode::Bootstrap { spread_pct: dec!(0), levels: 0 } ,
-            current_mode_for_cancellation : QuotingModeForCancelTriggers::Bootstrap
+            current_mode : QuotingMode::Bootstrap  ,
+            prev_mode : QuotingMode::Bootstrap  ,
+
         }
         // find the sollutiton for the best bid and the best ask value at cold start 
     }
@@ -192,30 +192,31 @@ impl SymbolState{
     //}
 
     pub fn should_exit_bootstrap(&mut self)->bool{
-        let min_trades = self.total_trades >= 20;
-        let min_volume = self.total_volume >= 1000;
+        // all of the conditions need to be met before the bootstrap mode can get finished 
+        let min_trades = self.total_trades >= MIN_TRADES_TO_EXIT_BOOTSTRAP;
+        let min_volume = self.total_volume >= MIN_VOLUME_TO_EXIT_BOOTSTRAP;
         
-        // tweak params 
         //not enough activity 
         if !min_trades || !min_volume {
             return false;  
         }
 
         //not enough data for volatility calc
-        let enough_samples = self.rolling_prices.len() >= 20;
+        let enough_samples = self.rolling_prices.len() >= MIN_SAMPLES_TO_EXIT_BOOTSTRAP;
         if !enough_samples {
             return false;  // Can't calculate volatility yet
         }
 
         // greater spread pct than 2 -> non volatile market 
         let current_spread = self.best_ask - self.best_bid;
-        let spread_pct = if self.market_state.mid_price > dec!(0) {
-            (current_spread / self.market_state.mid_price).to_f64().unwrap_or(1.0)
-        } else {
-            1.0
-        };
+        let spread_in_ticks = current_spread/TICK_SIZE;
+        //let spread_pct = if self.market_state.mid_price > dec!(0) {
+        //    (current_spread / self.market_state.mid_price).to_f64().unwrap_or(1.0)
+        //} else {
+        //    1.0
+        //};
 
-        let spread_tight = spread_pct < 0.02;  // <2% spread
+        let spread_tight = spread_in_ticks < dec!(7);  
         
         if !spread_tight {
             return false;  
@@ -234,7 +235,7 @@ impl SymbolState{
 
 
     pub fn determine_mode(&mut self)->QuotingMode{
-        // emergency mode check 
+        // emergency mode check due to losses 
         if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL || self.pnl.realized < MAX_ALLOWED_NEG_REALISED_PNL {
             // Cancel ALL active orders
             //self.cancel_all_orders(symbol);
@@ -242,6 +243,7 @@ impl SymbolState{
             self.current_mode = QuotingMode::Emergency;
             return QuotingMode::Emergency;
         }
+
 
 
         // inventory cap mode check 
@@ -258,8 +260,8 @@ impl SymbolState{
                 InventorySatus::Short
             };
             self.prev_mode = self.current_mode;
-            self.current_mode = QuotingMode::InventoryCapped { side, levels: 10 };
-            return QuotingMode::InventoryCapped { side, levels: 10 };
+            self.current_mode = QuotingMode::InventoryCapped { side };
+            return QuotingMode::InventoryCapped { side };
         }
 
 
@@ -271,14 +273,8 @@ impl SymbolState{
                 // Continue to check other modes
             } else {
                 // Stay in bootstrap
-                self.current_mode = QuotingMode::Bootstrap {
-                    spread_pct: dec!(0.05),  // 4% wide spread
-                    levels: 5,
-                };
-                return QuotingMode::Bootstrap {
-                    spread_pct: dec!(0.05),  // 4% wide spread
-                    levels: 5,
-                };
+                self.current_mode = QuotingMode::Bootstrap ;
+                return QuotingMode::Bootstrap ;
             }
         }
 
@@ -290,28 +286,16 @@ impl SymbolState{
         
         if is_high_volatility || is_inventory_warning {
             self.prev_mode = self.current_mode;
-            self.current_mode = QuotingMode::Stressed {
-                spread_mult: dec!(2.5),  // 2x wider spreads
-                levels: 5,               // Fewer levels
-            };
-            return QuotingMode::Stressed {
-                spread_mult: dec!(2.5),  // 2x wider spreads
-                levels: 5,               // Fewer levels
-            };
+            self.current_mode = QuotingMode::Stressed ;
+            return QuotingMode::Stressed ;
         }
 
 
         self.prev_mode = self.current_mode;
-        self.current_mode = QuotingMode::Normal {
-            levels: 10,
-            size_decay: 0.85,
-        };
+        self.current_mode = QuotingMode::Normal ;
         
-
-        QuotingMode::Normal {
-            levels: 7,
-            size_decay: 0.85,
-        }
+        // default
+       return  QuotingMode::Normal;
     }
 
     pub fn should_cancel_unprofitable_order(&self , order : &PendingOrder , current_mid : Decimal , current_spread:Decimal)->bool{
@@ -331,8 +315,8 @@ impl SymbolState{
 
         let current_spread_in_ticks = current_spread / TICK_SIZE;
 
-        match self.current_mode_for_cancellation{
-            QuotingModeForCancelTriggers::Bootstrap=>{
+        match self.current_mode{
+            QuotingMode::Bootstrap{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP {
                     return true;  
                 }
@@ -342,7 +326,7 @@ impl SymbolState{
                 }
             }
 
-            QuotingModeForCancelTriggers::Normal=>{
+            QuotingMode::Normal{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL{
                     return true;  
                 }
@@ -352,7 +336,7 @@ impl SymbolState{
                 }
             }
 
-            QuotingModeForCancelTriggers::Stressed=>{
+            QuotingMode::Stressed{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED {
                     return true;  
                 }
@@ -360,6 +344,12 @@ impl SymbolState{
                 if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED {
                     return true;  
                 }
+            }
+            QuotingMode::Emergency=>{
+
+            }
+            QuotingMode::InventoryCapped { .. }=>{
+
             }
         }
         
@@ -460,15 +450,16 @@ impl SymbolContext{
         
        
         match self.state.current_mode {
-            QuotingMode::Bootstrap { levels, .. } => {
-                let expected = levels * 2;
+            QuotingMode::Bootstrap  => {
+                // these willl be constants for now 
+                let expected = BOOTSTRAP_LEVELS * 2;
                 if total_active < expected / 2 {
                     return true;
                 }
             }
             
-            QuotingMode::Normal { levels, .. } => {
-                let expected = levels * 2;
+            QuotingMode::Normal => {
+                let expected = NORMAL_LEVELS * 2;
                 // Missing one side
                 if active_bids == 0 || active_asks == 0 {
                     return true;
@@ -479,15 +470,15 @@ impl SymbolContext{
                 }
             }
             
-            QuotingMode::Stressed { levels, .. } => {
-                let expected = levels * 2;
+            QuotingMode::Stressed  => {
+                let expected = STRESSED_LEVELS * 2;
                 if total_active < expected / 2 {
                     return true;
                 }
             }
             
-            QuotingMode::InventoryCapped { side, levels } => {
-                let expected = levels;
+            QuotingMode::InventoryCapped { side } => {
+                let expected = CAPPED_LEVELS;
                 let active_on_required_side = match side {
                     InventorySatus::Long => active_asks,   // Need asks to sell
                     InventorySatus::Short => active_bids,  // Need bids to buy
@@ -531,38 +522,37 @@ impl SymbolContext{
                 })
             }
 
-            QuotingMode::Bootstrap { spread_pct, levels } => {
-                self.build_bootstrap_ladder(spread_pct, levels)
+            QuotingMode::Bootstrap  => {
+                self.build_bootstrap_ladder()
             }
             
-            QuotingMode::Normal { levels, size_decay } => {
-                self.build_normal_ladder( levels, size_decay)
+            QuotingMode::Normal  => {
+                self.build_normal_ladder()
             }
             
-            QuotingMode::Stressed { spread_mult, levels } => {
-                self.build_stressed_ladder(spread_mult, levels)
+            QuotingMode::Stressed  => {
+                self.build_stressed_ladder()
             }
             
-            QuotingMode::InventoryCapped { side, levels } => {
-                self.build_capped_ladder(side, levels)
+            QuotingMode::InventoryCapped { side } => {
+                self.build_capped_ladder(side)
             }
         }
        
     }
 
 
-    pub fn build_bootstrap_ladder(&self , spread_pct : Decimal , levels:usize)->Result<TargetLadder , MmError>{
-        const TICK_SIZE: Decimal = dec!(0.25); // configure 
+    pub fn build_bootstrap_ladder(&self)->Result<TargetLadder , MmError>{
         const BASE_SIZE: u64 = 100; // configure 
         
-        let half_spread = self.state.ipo_price * spread_pct / dec!(2);
+        let half_spread = self.state.ipo_price * BOOTSTRAP_SPREAD_PCT / dec!(2);
         let center_bid = self.state.ipo_price - half_spread;
         let center_ask = self.state.ipo_price + half_spread;
         
-        let mut bids = Vec::with_capacity(levels);
-        let mut asks = Vec::with_capacity(levels);
+        let mut bids = Vec::with_capacity(BOOTSTRAP_LEVELS);
+        let mut asks = Vec::with_capacity(BOOTSTRAP_LEVELS);
         
-        for i in 0..levels {
+        for i in 0..BOOTSTRAP_LEVELS {
             let offset = TICK_SIZE * Decimal::from(i);
             let size = (BASE_SIZE as f64 * 0.85_f64.powi(i as i32)) as u64;
             
@@ -585,7 +575,7 @@ impl SymbolContext{
         Ok(TargetLadder { bids, asks })
     }
 
-    pub fn build_normal_ladder(&self , levels : usize , size_decay : f64)->Result<TargetLadder , MmError>{
+    pub fn build_normal_ladder(&self)->Result<TargetLadder , MmError>{
         const TICK_SIZE: Decimal = dec!(0.25); 
         match calculate_optimal_quotes(
             self.state.market_state.mid_price, 
@@ -599,14 +589,14 @@ impl SymbolContext{
                 // optimal bid price and the optimal ask price 
                 let (bid_size , ask_size) = self.state.compute_quote_sizes();
 
-                let mut bids = Vec::with_capacity(levels);
-                let mut asks = Vec::with_capacity(levels);
+                let mut bids = Vec::with_capacity(NORMAL_LEVELS);
+                let mut asks = Vec::with_capacity(NORMAL_LEVELS);
 
 
-                for i in 0..levels {
+                for i in 0..NORMAL_LEVELS {
                     let offset = TICK_SIZE * Decimal::from(i);
-                    let bid_size = (bid_size as f64 * size_decay.powi(i as i32)) as u64;
-                    let ask_size = (ask_size as f64 * size_decay.powi(i as i32)) as u64;
+                    let bid_size = (bid_size as f64 * NORMAL_SIZE_DECAY.powi(i as i32)) as u64;
+                    let ask_size = (ask_size as f64 * NORMAL_SIZE_DECAY.powi(i as i32)) as u64;
 
                     bids.push(TargetQuotes {
                         price: quotes.0 - offset,
@@ -637,7 +627,7 @@ impl SymbolContext{
             
     }
 
-    pub fn build_stressed_ladder(&self , spread_mult : Decimal , levels : usize)->Result<TargetLadder , MmError>{
+    pub fn build_stressed_ladder(&self)->Result<TargetLadder , MmError>{
         const TICK_SIZE: Decimal = dec!(0.25);
         const BASE_SIZE: u64 = 50;
 
@@ -654,15 +644,15 @@ impl SymbolContext{
                 let center_ask = quotes.1;
 
                 let current_spread = center_ask - center_bid;
-                let extra_spread = current_spread * (spread_mult - dec!(1)) / dec!(2);
+                let extra_spread = current_spread * (STRESSED_SPREAD_MULT - dec!(1)) / dec!(2);
                 
                 let new_bid = center_bid - extra_spread;
                 let new_ask = center_ask + extra_spread;
                 
-                let mut bids = Vec::with_capacity(levels);
-                let mut asks = Vec::with_capacity(levels);
+                let mut bids = Vec::with_capacity(STRESSED_LEVELS);
+                let mut asks = Vec::with_capacity(STRESSED_LEVELS);
                 
-                for i in 0..levels {
+                for i in 0..STRESSED_LEVELS {
                     let offset = TICK_SIZE * Decimal::from(i);
                     let size = (BASE_SIZE as f64 * 0.80_f64.powi(i as i32)) as u64;
                     
@@ -690,7 +680,7 @@ impl SymbolContext{
         }
     }
 
-    pub fn build_capped_ladder(&self , side : InventorySatus ,levels : usize)->Result<TargetLadder , MmError>{
+    pub fn build_capped_ladder(&self , side : InventorySatus)->Result<TargetLadder , MmError>{
         const TICK_SIZE: Decimal = dec!(0.25);
         const BASE_SIZE: u64 = 150; 
         match calculate_optimal_quotes(
@@ -712,7 +702,7 @@ impl SymbolContext{
                 match side {
                     InventorySatus::Long => {
                         // Only asks (to sell)
-                        for i in 0..levels {
+                        for i in 0..CAPPED_LEVELS {
                             let offset = TICK_SIZE * Decimal::from(i);
                             let size = (BASE_SIZE as f64 * 0.90_f64.powi(i as i32)) as u64;
                             
@@ -727,7 +717,7 @@ impl SymbolContext{
                     
                     InventorySatus::Short => {
                         // Only bids (to buy)
-                        for i in 0..levels {
+                        for i in 0..CAPPED_LEVELS {
                             let offset = TICK_SIZE * Decimal::from(i);
                             let size = (BASE_SIZE as f64 * 0.90_f64.powi(i as i32)) as u64;
                             
@@ -1402,6 +1392,8 @@ impl MarketMaker{
                         }
                     }
 
+
+                    // this is very rare that this function wuld get ca;;ed , its just a cleanup function 
                     ctx.check_if_time_caused_cancellation(*symbol, &mut self.cancel_batch);
                     
                     

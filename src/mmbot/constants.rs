@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use market_maker_rs::dec;
 use rust_decimal::Decimal;
-use serde::de;
+
 
 
 // constant for the global tick size 
@@ -67,3 +67,23 @@ pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL : Decimal = dec!(12);
 
 // min profitable spread in ticks , below this , cancel 
 pub const MIN_PROFITABLE_SPREAD_IN_TICKS : Decimal = dec!(2);
+
+
+
+// exit bootstrap 
+pub const MIN_TRADES_TO_EXIT_BOOTSTRAP : u64 = 7;
+pub const MIN_VOLUME_TO_EXIT_BOOTSTRAP : u64 = 400;
+pub const MIN_SAMPLES_TO_EXIT_BOOTSTRAP : usize = 100;
+
+
+
+
+
+
+pub const BOOTSTRAP_SPREAD_PCT : Decimal = dec!(0.05);
+pub const BOOTSTRAP_LEVELS : usize = 3;
+pub const NORMAL_LEVELS : usize = 5;
+pub const NORMAL_SIZE_DECAY : f64 = 0.85;
+pub const STRESSED_SPREAD_MULT : Decimal = dec!(2.5);
+pub const STRESSED_LEVELS : usize = 3;
+pub const CAPPED_LEVELS : usize = 2;
