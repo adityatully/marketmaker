@@ -81,9 +81,12 @@ pub const MIN_SAMPLES_TO_EXIT_BOOTSTRAP : usize = 100;
 
 
 pub const BOOTSTRAP_SPREAD_PCT : Decimal = dec!(0.05);
-pub const BOOTSTRAP_LEVELS : usize = 3;
-pub const NORMAL_LEVELS : usize = 5;
+pub const BOOTSTRAP_LEVELS : usize = 4;
+pub const NORMAL_LEVELS : usize = 6;
 pub const NORMAL_SIZE_DECAY : f64 = 0.85;
 pub const STRESSED_SPREAD_MULT : Decimal = dec!(2.5);
-pub const STRESSED_LEVELS : usize = 3;
+pub const STRESSED_LEVELS : usize = 4;
 pub const CAPPED_LEVELS : usize = 2;
+
+
+pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that the mm will be alloted after the ipo

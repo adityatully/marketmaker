@@ -14,8 +14,9 @@ use crate::mmbot::types::{OrderState  , Side , PendingOrder};
 use crate::mmbot::constants::{SAMPLE_GAP , MAX_SYMBOLS , VOLITILTY_CALC_GAP , 
     QUOTING_GAP , MANAGEMENT_CYCLE_GAP , TARGET_INVENTORY , MAX_SIZE_FOR_ORDER , INVENTORY_CAP , MAX_BOOK_MULT , 
     TICK_SIZE  , MIN_PROFITABLE_SPREAD_IN_TICKS , INVENTORY_CANCELLATION_TRIGGER_AMNT ,
-    MAX_ORDER_AGE , MAX_ALLOWED_NEG_TOTAL_PNL , MAX_ALLOWED_NEG_REALISED_PNL
+    MAX_ORDER_AGE , MAX_ALLOWED_NEG_TOTAL_PNL , MAX_ALLOWED_NEG_REALISED_PNL , BASE_SIZE_BOOTSTRAP
 }; 
+
 
 
 #[derive(Debug)]
@@ -318,30 +319,36 @@ impl SymbolState{
         match self.current_mode{
             QuotingMode::Bootstrap{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP {
+                    // 20 ticks is 5 rs or 5 dollars  
                     return true;  
                 }
                 
                 if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP {
+                    // 8 ticks => 2rs 
                     return true;  
                 }
             }
 
             QuotingMode::Normal{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL{
+                    // 2.5 rs , max mid movement allowed 
                     return true;  
                 }
                 
                 if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL {
+                    // 0.5 rs min spread to ensure prpfit 
                     return true;  
                 }
             }
 
             QuotingMode::Stressed{..}=>{
                 if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED {
+                    // 1.75 rs , max mid movement allowed
                     return true;  
                 }
                 
                 if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED {
+                    // 1.25 -> min possible spread for profit 
                     return true;  
                 }
             }
@@ -543,7 +550,6 @@ impl SymbolContext{
 
 
     pub fn build_bootstrap_ladder(&self)->Result<TargetLadder , MmError>{
-        const BASE_SIZE: u64 = 100; // configure 
         
         let half_spread = self.state.ipo_price * BOOTSTRAP_SPREAD_PCT / dec!(2);
         let center_bid = self.state.ipo_price - half_spread;
@@ -554,11 +560,11 @@ impl SymbolContext{
         
         for i in 0..BOOTSTRAP_LEVELS {
             let offset = TICK_SIZE * Decimal::from(i);
-            let size = (BASE_SIZE as f64 * 0.85_f64.powi(i as i32)) as u64;
+            let size = (BASE_SIZE_BOOTSTRAP as f64 * 0.85_f64.powi(i as i32)) as u64;
             
             bids.push(TargetQuotes {
                 price: center_bid - offset,
-                qty: size.max(10) as u32,
+                qty: size.max(10) as u32, // configure quanjtity 
                 side: Side::BID,
                 level : i 
                 
@@ -576,7 +582,6 @@ impl SymbolContext{
     }
 
     pub fn build_normal_ladder(&self)->Result<TargetLadder , MmError>{
-        const TICK_SIZE: Decimal = dec!(0.25); 
         match calculate_optimal_quotes(
             self.state.market_state.mid_price, 
             self.state.inventory.quantity, 
@@ -620,11 +625,6 @@ impl SymbolContext{
                 return Err(MmError::CouldNotCalculateQuotes);
             }
         }
-        
-
-        
-
-            
     }
 
     pub fn build_stressed_ladder(&self)->Result<TargetLadder , MmError>{
@@ -934,9 +934,6 @@ impl MarketMaker{
                     }
                 }
 
-
-
-
                 ctx.state.market_state.mid_price = (ctx.state.best_ask + ctx.state.best_bid)/dec!(2);
                 // mid price changed so the unrelaised pnl aslo changes 
                 if ctx.state.inventory.quantity != dec!(0){
@@ -1042,9 +1039,9 @@ impl MarketMaker{
                     mm_order.remaining_size = mm_order.remaining_size.saturating_sub(market_fill.fill_quantity);
 
                     if mm_order.remaining_size == 0{
-                        mm_order.state = super::types::OrderState::CompletelyFilled
+                        mm_order.state = OrderState::CompletelyFilled
                     }else{
-                        mm_order.state = super::types::OrderState::PartiallyFilled
+                        mm_order.state = OrderState::PartiallyFilled
                     }
 
 
@@ -1102,6 +1099,7 @@ impl MarketMaker{
             Some(ctx)=>{
                 // remove it now , 
                 ctx.orders.pending_orders.retain(|order| order.exchange_order_id != Some(api_response.order_id) && order.state == OrderState::PendingCancel);
+                
             }
             None=>{
                 return Err(MmError::SymbolNotFound);
@@ -1150,8 +1148,6 @@ impl MarketMaker{
                 // stale orders getting canclled before we requote 
             }
         }
-
-
 
 
         let current_spread = symbol_context.state.best_ask - symbol_context.state.best_bid;
@@ -1291,11 +1287,21 @@ impl MarketMaker{
 
     // market maker running looop
 
-    pub fn run_market_maker(&mut self ){
+    pub fn run_market_maker(&mut self){
         loop{
             // clear the two batches 
             self.cancel_batch.clear();
             self.post_bacth.clear();
+
+
+            // now needing to process fills an order got matched for the market maker 
+            while let Ok(Some(fill)) = self.fill_queue.dequeue(){
+                let _= self.update_inventory_from_fill(fill);
+                // order manager update 
+                let _ = self.order_manager_update_after_fill(fill);
+            }
+
+            // HANDLE ALL THE EVENTS WE RECEIVE 
             // first we consume the feed from the engine 
             while let Ok(Some(feed)) = self.feed_queue.dequeue(){
                 let symbol = feed.symbol;
@@ -1309,16 +1315,6 @@ impl MarketMaker{
                     }
                 }
             }
-
-
-            // now needing to process fills an order got matched for the market maker 
-            while let Ok(Some(fill)) = self.fill_queue.dequeue(){
-                // state(inventory ) shud change , order manager change 
-                let _= self.update_inventory_from_fill(fill);
-                // order manager update 
-                let _ = self.order_manager_update_after_fill(fill);
-            }
-
 
             while let Ok(Some(api_message)) = self.message_queue.dequeue(){
                 let symbol = api_message.symbol;
@@ -1341,10 +1337,11 @@ impl MarketMaker{
                 }
             }
 
+
+
+
             // updating the steate loop
             for (symbol  , ctx) in self.symbol_ctx.iter_mut(){
-
-
                 let deref_symbol = *symbol;
                 if ctx.state.last_sample_time.elapsed() >= SAMPLE_GAP{
                     ctx.state.rolling_prices.push(ctx.state.market_state.mid_price);
@@ -1403,6 +1400,7 @@ impl MarketMaker{
                     }
 
                     let _ = ctx.state.determine_mode(); // no need to return , just update the mode 
+                    // can return emergency or invetnory capped also 
 
 
                     if ctx.should_requote(){
