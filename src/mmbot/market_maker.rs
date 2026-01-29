@@ -1285,7 +1285,7 @@ impl MarketMaker{
 
     }
 
-    // market maker running looop
+    // market maker running looop 
 
     pub fn run_market_maker(&mut self){
         loop{
@@ -1304,11 +1304,11 @@ impl MarketMaker{
             // HANDLE ALL THE EVENTS WE RECEIVE 
             // first we consume the feed from the engine 
             while let Ok(Some(feed)) = self.feed_queue.dequeue(){
-                let symbol = feed.symbol;
+               // let symbol = feed.symbol;
                 // update the feed for that symbol 
                 match self.update_state_from_feed(feed){
                     Ok(_)=>{
-                        self.check_if_depth_update_causes_cancellation(symbol);
+                        //self.check_if_depth_update_causes_cancellation(symbol);
                     }
                     Err(error)=>{
                         eprintln!(" feed update error {:?}" , error);
