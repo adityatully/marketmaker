@@ -90,3 +90,5 @@ pub const CAPPED_LEVELS : usize = 2;
 
 
 pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that the mm will be alloted after the ipo
+
+pub const WARMUP_DURATION : Duration = Duration::from_secs(400); 

@@ -4,14 +4,11 @@ use rust_decimal::Decimal;
 
 // level are basically price levels  how deep to quote 
 
-#[derive(Debug, Clone, PartialEq , Copy)]
-pub enum QuotingMode {
-    Bootstrap ,
+
+#[derive(Debug, Clone , Copy , PartialEq)]
+pub enum TradingRegime{
+    WarmUp ,
     Normal ,
-    Stressed ,
-    InventoryCapped  {
-        side : InventorySatus
-    } ,
     Emergency
 }
 
