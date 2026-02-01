@@ -1108,97 +1108,97 @@ impl MarketMaker{
         Ok(())
     }
 
-    pub fn check_if_depth_update_causes_cancellation(&mut self , symbol : u32){
-        
-        let symbol_context = match self.symbol_ctx.get_mut(&symbol){
-            Some(ctx)=>ctx ,
-            None => return 
-        };
-
-        let mid_price_move = (symbol_context.state.market_state.mid_price - symbol_context.state.prev_mid_price).abs();
-        // percentage change in price 
-        //let price_move_pct = if symbol_context.state.prev_mid_price != dec!(0) {
-        //    (mid_price_move / symbol_context.state.prev_mid_price).to_f64().unwrap_or(0.0)
-        //} else {
-        //    0.0
-        //};
-
-        let mid_price_move_in_ticks = mid_price_move/TICK_SIZE;
-
-        if mid_price_move_in_ticks >= dec!(3) {  
-            for order in &mut symbol_context.orders.pending_orders {
-                if order.state != OrderState::Active {
-                    continue;
-                }
-                // cancellation when there becomes no chance of matching 
-                // doing only urgent and instantanoues cancellations here , that definately need to be cancelled 
-                // the orders are crossing the market 
-                let should_cancel = match order.side {
-                    Side::BID => order.price > symbol_context.state.market_state.mid_price,  // Bid above mid
-                    Side::ASK => order.price < symbol_context.state.market_state.mid_price,  // Ask below mid
-                };
-                
-                if should_cancel {
-                    if let Some(order_id) = order.exchange_order_id {
-                        // send cancellation request 
-                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-                        order.state = OrderState::PendingCancel;
-                    }
-                }
-                // stale orders getting canclled before we requote 
-            }
-        }
-
-
-        let current_spread = symbol_context.state.best_ask - symbol_context.state.best_bid;
-        let spread_in_ticks = current_spread/TICK_SIZE;
-
-        if spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS {  
-            
-            for order in &mut symbol_context.orders.pending_orders {
-                if order.state == OrderState::Active {
-                    if let Some(order_id) = order.exchange_order_id {
-                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-                        order.state = OrderState::PendingCancel;
-                    }
-                }
-            }
-            return;  // No need to check other triggers
-        }
-        
-
-        if symbol_context.state.prev_best_bid_qty > 0 {
-            let bid_depth_ratio = symbol_context.state.best_bid_qty as f64 / symbol_context.state.prev_best_bid_qty as f64;
-            
-            if bid_depth_ratio < 0.3 {  // 70% of depth gone
-                
-                
-                for order in &mut symbol_context.orders.pending_orders {
-                    if order.side == Side::BID && order.state == OrderState::Active {
-                        if let Some(order_id) = order.exchange_order_id {
-                            self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-                            order.state = OrderState::PendingCancel;
-                        }
-                    }
-                }
-            }
-        }
-        if symbol_context.state.prev_best_ask_qty > 0 {
-            let ask_depth_ratio = symbol_context.state.best_ask_qty as f64 / symbol_context.state.prev_best_ask_qty as f64;
-            
-            if ask_depth_ratio < 0.3 {
-                for order in &mut symbol_context.orders.pending_orders {
-                    if order.side == Side::ASK && order.state == OrderState::Active {
-                        if let Some(order_id) = order.exchange_order_id {
-                           //self.send_cancel_request(symbol, order.client_id, order_id);
-                            self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-                            order.state = OrderState::PendingCancel;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    //pub fn check_if_depth_update_causes_cancellation(&mut self , symbol : u32){
+    //    
+    //    let symbol_context = match self.symbol_ctx.get_mut(&symbol){
+    //        Some(ctx)=>ctx ,
+    //        None => return 
+    //    };
+//
+    //    let mid_price_move = (symbol_context.state.market_state.mid_price - symbol_context.state.prev_mid_price).abs();
+    //    // percentage change in price 
+    //    //let price_move_pct = if symbol_context.state.prev_mid_price != dec!(0) {
+    //    //    (mid_price_move / symbol_context.state.prev_mid_price).to_f64().unwrap_or(0.0)
+    //    //} else {
+    //    //    0.0
+    //    //};
+//
+    //    let mid_price_move_in_ticks = mid_price_move/TICK_SIZE;
+//
+    //    if mid_price_move_in_ticks >= dec!(3) {  
+    //        for order in &mut symbol_context.orders.pending_orders {
+    //            if order.state != OrderState::Active {
+    //                continue;
+    //            }
+    //            // cancellation when there becomes no chance of matching 
+    //            // doing only urgent and instantanoues cancellations here , that definately need to be cancelled 
+    //            // the orders are crossing the market 
+    //            let should_cancel = match order.side {
+    //                Side::BID => order.price > symbol_context.state.market_state.mid_price,  // Bid above mid
+    //                Side::ASK => order.price < symbol_context.state.market_state.mid_price,  // Ask below mid
+    //            };
+    //            
+    //            if should_cancel {
+    //                if let Some(order_id) = order.exchange_order_id {
+    //                    // send cancellation request 
+    //                    self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
+    //                    order.state = OrderState::PendingCancel;
+    //                }
+    //            }
+    //            // stale orders getting canclled before we requote 
+    //        }
+    //    }
+//
+//
+    //    let current_spread = symbol_context.state.best_ask - symbol_context.state.best_bid;
+    //    let spread_in_ticks = current_spread/TICK_SIZE;
+//
+    //    if spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS {  
+    //        
+    //        for order in &mut symbol_context.orders.pending_orders {
+    //            if order.state == OrderState::Active {
+    //                if let Some(order_id) = order.exchange_order_id {
+    //                    self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
+    //                    order.state = OrderState::PendingCancel;
+    //                }
+    //            }
+    //        }
+    //        return;  // No need to check other triggers
+    //    }
+    //    
+//
+    //    if symbol_context.state.prev_best_bid_qty > 0 {
+    //        let bid_depth_ratio = symbol_context.state.best_bid_qty as f64 / symbol_context.state.prev_best_bid_qty as f64;
+    //        
+    //        if bid_depth_ratio < 0.3 {  // 70% of depth gone
+    //            
+    //            
+    //            for order in &mut symbol_context.orders.pending_orders {
+    //                if order.side == Side::BID && order.state == OrderState::Active {
+    //                    if let Some(order_id) = order.exchange_order_id {
+    //                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
+    //                        order.state = OrderState::PendingCancel;
+    //                    }
+    //                }
+    //            }
+    //        }
+    //    }
+    //    if symbol_context.state.prev_best_ask_qty > 0 {
+    //        let ask_depth_ratio = symbol_context.state.best_ask_qty as f64 / symbol_context.state.prev_best_ask_qty as f64;
+    //        
+    //        if ask_depth_ratio < 0.3 {
+    //            for order in &mut symbol_context.orders.pending_orders {
+    //                if order.side == Side::ASK && order.state == OrderState::Active {
+    //                    if let Some(order_id) = order.exchange_order_id {
+    //                       //self.send_cancel_request(symbol, order.client_id, order_id);
+    //                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
+    //                        order.state = OrderState::PendingCancel;
+    //                    }
+    //                }
+    //            }
+    //        }
+    //    }
+    //}
 
 
     pub fn send_cancel_request(&mut self , symbol : u32 , client_id : u64 , order_id : u64 )->Result<() , QueueError>{
@@ -1304,11 +1304,10 @@ impl MarketMaker{
             // HANDLE ALL THE EVENTS WE RECEIVE 
             // first we consume the feed from the engine 
             while let Ok(Some(feed)) = self.feed_queue.dequeue(){
-               // let symbol = feed.symbol;
                 // update the feed for that symbol 
                 match self.update_state_from_feed(feed){
                     Ok(_)=>{
-                        //self.check_if_depth_update_causes_cancellation(symbol);
+                       // self.check_if_depth_update_causes_cancellation(symbol);
                     }
                     Err(error)=>{
                         eprintln!(" feed update error {:?}" , error);
