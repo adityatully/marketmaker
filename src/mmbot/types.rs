@@ -12,6 +12,15 @@ pub enum TradingRegime{
     Emergency
 }
 
+pub struct QuotingParamLimits{
+    pub num_levels : usize , 
+    pub should_use_as : bool , 
+    pub min_spread_ticks   : Decimal , 
+    pub max_distance_from_mid : Decimal ,
+}
+
+
+
 
 #[derive(Debug)]
 pub struct SymbolOrders {

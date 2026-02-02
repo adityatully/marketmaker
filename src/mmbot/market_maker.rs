@@ -5,7 +5,7 @@ use std::{collections::VecDeque, time::{Instant}};
 use crate::{mmbot::{constants::{
     BOOTSTRAP_LEVELS, BOOTSTRAP_SPREAD_PCT, CAPPED_LEVELS, MAX_ALLOWED_NEG_REALISED_PNL, MAX_ALLOWED_NEG_TOTAL_PNL, NORMAL_LEVELS, NORMAL_SIZE_DECAY, STRESSED_LEVELS, STRESSED_SPREAD_MULT, WARMUP_DURATION},
       rolling_price::RollingPrice, 
-    types::{CancelData, InventorySatus, MmError, PostData, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
+    types::{CancelData, InventorySatus, MmError, PostData, QuotingParamLimits, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
     fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, 
     order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, 
@@ -38,34 +38,29 @@ pub struct SymbolState{
     pub prev_best_bid_qty: u32,
     pub prev_best_ask_qty: u32,
     pub prev_mid_price: Decimal,
-
     // market state for storing volatility and mid price for each symbol 
     pub market_state : MarketState,
-
     // rolling price history for volatility calculation , each symbol 
     pub rolling_prices: RollingPrice, 
-
     // Inventory for each symbol long , short how much 
     pub inventory : InventoryPosition,
     pub pnl       : PnL,
-
     // Timing
-   // pub last_quoted: Instant, // last quoting for this symbol 
     pub last_volatility_calc: Instant, // last volatility calculation
     pub last_sample_time: Instant, // when did we add the mid price to the rolling prices array last 
     pub last_management_cycle_time : Instant,
-  
     // AS model constants 
     pub risk_aversion: Decimal,       
     pub time_to_terminal : u64,        
     pub liquidity_k: Decimal,            // order intensity 
-
     // keeping model constants per symbol , an auto adjusting formula needs to be developed to modify these 
     // according to market conditions
-
     pub regime : TradingRegime,
     pub regime_start_time : Instant
 }
+
+
+
 // each symbol state shud have a defualt inventory for init (ik)
 impl SymbolState{
     pub fn new(ipo_price : Decimal , symbol:u32)->Self{
@@ -172,79 +167,6 @@ impl SymbolState{
         (bid_size as u64, ask_size as u64)
     }
 
-    //pub fn generate_client_id(&mut self) -> u64 {
-    //    let id = self.next_client_id;
-    //    self.next_client_id += 1;
-    //    id
-    //}
-
-//
-    //pub fn determine_mode(&mut self)->QuotingMode{
-    //    // emergency mode check due to losses 
-    //    if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL || self.pnl.realized < MAX_ALLOWED_NEG_REALISED_PNL {
-    //        // Cancel ALL active orders
-    //        //self.cancel_all_orders(symbol);
-    //        self.prev_mode = self.current_mode;
-    //        self.current_mode = QuotingMode::Emergency;
-    //        return QuotingMode::Emergency;
-    //    }
-//
-//
-//
-    //    // inventory cap mode check 
-    //    let inv_abs = self.inventory.quantity.abs();
-    //    let inv_ratio = (inv_abs / INVENTORY_CAP).to_f64().unwrap_or(0.0);
-    //    if inv_abs >= INVENTORY_CAP {  // Hard cap hit
-    //        let side = if self.inventory.quantity > dec!(0) {
-    //            // Cancel all BUY orders (don't buy more)
-    //            //self.cancel_side(symbol, 0);
-    //            InventorySatus::Long
-    //        } else {
-    //            // Cancel all SELL orders (don't sell more)
-    //            //self.cancel_side(symbol, 1);
-    //            InventorySatus::Short
-    //        };
-    //        self.prev_mode = self.current_mode;
-    //        self.current_mode = QuotingMode::InventoryCapped { side };
-    //        return QuotingMode::InventoryCapped { side };
-    //    }
-//
-//
-    //    if !self.is_bootstrapped {
-    //        self.prev_mode = self.current_mode;
-    //        //  if we should exit bootstrap
-    //        if self.should_exit_bootstrap() {
-    //            self.is_bootstrapped = true;
-    //            // Continue to check other modes
-    //        } else {
-    //            // Stay in bootstrap
-    //            self.current_mode = QuotingMode::Bootstrap ;
-    //            return QuotingMode::Bootstrap ;
-    //        }
-    //    }
-//
-//
-    //    // stressed more in terms of high volatility 
-    //    let _vol_pct = (self.market_state.volatility * dec!(100)).to_f64().unwrap_or(0.0);
-    //    let is_high_volatility = self.market_state.volatility > dec!(0.06);  // 6%
-    //    let is_inventory_warning = inv_ratio >= 0.80;  // 80% of cap
-    //    
-    //    if is_high_volatility || is_inventory_warning {
-    //        self.prev_mode = self.current_mode;
-    //        self.current_mode = QuotingMode::Stressed ;
-    //        return QuotingMode::Stressed ;
-    //    }
-//
-//
-    //    self.prev_mode = self.current_mode;
-    //    self.current_mode = QuotingMode::Normal ;
-    //    
-    //    // default
-    //   return  QuotingMode::Normal;
-    //}
-
-//
-
     pub fn determine_regime(&mut self )->TradingRegime{
         if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL 
             || self.pnl.realized < MAX_ALLOWED_NEG_REALISED_PNL {
@@ -255,18 +177,23 @@ impl SymbolState{
             return TradingRegime::Emergency;
         }
 
-        if self.regime_start_time.elapsed() < WARMUP_DURATION {
+        if self.regime == TradingRegime::WarmUp{
+            let enough_time = self.regime_start_time.elapsed() >= WARMUP_DURATION;
+            let enough_samples = self.rolling_prices.len() >= 20 ;
+
+            if enough_samples && enough_time{
+                self.regime = TradingRegime::Normal;
+                self.regime_start_time = Instant::now();
+                return TradingRegime::Normal;
+            }
+
             return TradingRegime::WarmUp;
         }
 
-        if self.regime != TradingRegime::Normal {
-            self.regime = TradingRegime::Normal;
-            self.regime_start_time = Instant::now();
-        }
         TradingRegime::Normal
     }
 
-    
+
     pub fn should_cancel_unprofitable_order(&self , order : &PendingOrder , current_mid : Decimal , current_spread:Decimal)->bool{
         let distance_from_mid = (order.price - current_mid).abs();
         let distance_from_mid_in_ticks = distance_from_mid/TICK_SIZE;
@@ -284,49 +211,6 @@ impl SymbolState{
 
         let current_spread_in_ticks = current_spread / TICK_SIZE;
 
-        //match self.current_mode{
-        //    QuotingMode::Bootstrap{..}=>{
-        //        if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP {
-        //            // 20 ticks is 5 rs or 5 dollars  
-        //            return true;  
-        //        }
-        //        
-        //        if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP {
-        //            // 8 ticks => 2rs 
-        //            return true;  
-        //        }
-        //    }
-//
-        //    QuotingMode::Normal{..}=>{
-        //        if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL{
-        //            // 2.5 rs , max mid movement allowed 
-        //            return true;  
-        //        }
-        //        
-        //        if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL {
-        //            // 0.5 rs min spread to ensure prpfit 
-        //            return true;  
-        //        }
-        //    }
-//
-        //    QuotingMode::Stressed{..}=>{
-        //        if distance_from_mid_in_ticks > MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED {
-        //            // 1.75 rs , max mid movement allowed
-        //            return true;  
-        //        }
-        //        
-        //        if current_spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED {
-        //            // 1.25 -> min possible spread for profit 
-        //            return true;  
-        //        }
-        //    }
-        //    QuotingMode::Emergency=>{
-//
-        //    }
-        //    QuotingMode::InventoryCapped { .. }=>{
-//
-        //    }
-        //}
         false  
     }
 
@@ -349,6 +233,35 @@ impl SymbolState{
         }
         
         false
+    }
+
+    pub fn get_quoting_params(&self)->QuotingParamLimits{
+        match self.regime {
+            TradingRegime::Emergency=>{
+                QuotingParamLimits { 
+                    num_levels: 0, 
+                    should_use_as: false, 
+                    min_spread_ticks: dec!(0), 
+                    max_distance_from_mid: dec!(0)
+                }
+            }
+            TradingRegime::Normal=>{
+                QuotingParamLimits { 
+                    num_levels: 5, 
+                    should_use_as: true, 
+                    min_spread_ticks: dec!(10), 
+                    max_distance_from_mid: dec!(10) 
+                }
+            }
+            TradingRegime::WarmUp=>{
+                QuotingParamLimits { 
+                    num_levels: 3, 
+                    should_use_as: false, 
+                    min_spread_ticks: dec!(8), 
+                    max_distance_from_mid: dec!(20) 
+                }
+            }
+        }
     }
 }
 
@@ -385,7 +298,6 @@ impl SymbolContext{
             }
         }
     }
-
     pub fn should_requote(&self) -> bool {
 
 
@@ -421,50 +333,7 @@ impl SymbolContext{
             return true;
         }
         
-        //match self.state.current_mode {
-        //    QuotingMode::Bootstrap  => {
-        //        // these willl be constants for now 
-        //        let expected = BOOTSTRAP_LEVELS * 2;
-        //        if total_active < expected / 2 {
-        //            return true;
-        //        }
-        //    }
-        //    
-        //    QuotingMode::Normal => {
-        //        let expected = NORMAL_LEVELS * 2;
-        //        // Missing one side
-        //        if active_bids == 0 || active_asks == 0 {
-        //            return true;
-        //        }
-        //        // Too few orders
-        //        if total_active < expected / 2 {
-        //            return true;
-        //        }
-        //    }
-        //    
-        //    QuotingMode::Stressed  => {
-        //        let expected = STRESSED_LEVELS * 2;
-        //        if total_active < expected / 2 {
-        //            return true;
-        //        }
-        //    }
-        //    
-        //    QuotingMode::InventoryCapped { side } => {
-        //        let expected = CAPPED_LEVELS;
-        //        let active_on_required_side = match side {
-        //            InventorySatus::Long => active_asks,   // Need asks to sell
-        //            InventorySatus::Short => active_bids,  // Need bids to buy
-        //        };
-        //        
-        //        if active_on_required_side < expected / 2 {
-        //            return true;
-        //        }
-        //    }
-        //    
-        //    QuotingMode::Emergency => {
-        //        return false;
-        //    }
-        //}
+        
 
 
         let mid_move = (self.state.market_state.mid_price - self.state.prev_mid_price).abs();
@@ -479,7 +348,6 @@ impl SymbolContext{
         if mid_move_ticks >= dec!(2) {
             return true;
         }
-
         // default dont 
         false
     }
@@ -871,43 +739,13 @@ impl MarketMaker{
                 ctx.state.best_ask_qty = market_feed.best_ask_qty;
                 ctx.state.best_bid_qty = market_feed.best_bid_qty;
 
-
-                //if !ctx.state.is_bootstrapped {
-                //    // If price moved AND depth decreased, a trade likely happened
-                //    let bid_moved = ctx.state.best_bid != ctx.state.prev_best_bid;
-                //    let ask_moved = ctx.state.best_ask != ctx.state.prev_best_ask;
-                //    
-                //    let bid_depth_decreased = ctx.state.best_bid_qty < ctx.state.prev_best_bid_qty;
-                //    let ask_depth_decreased = ctx.state.best_ask_qty < ctx.state.prev_best_ask_qty;
-                //    
-                //    // Infer trade on bid side
-                //    if bid_moved || bid_depth_decreased {
-                //        let qty_change = ctx.state.prev_best_bid_qty.saturating_sub(ctx.state.best_bid_qty);
-                //        if qty_change > 0 {
-                //            ctx.state.total_volume += qty_change as u64;
-                //            ctx.state.total_trades += 1;
-                //        }
-                //    }
-                //    
-                //    // Infer trade on ask side
-                //    if ask_moved || ask_depth_decreased {
-                //        let qty_change = ctx.state.prev_best_ask_qty.saturating_sub(ctx.state.best_ask_qty);
-                //        if qty_change > 0 {
-                //            ctx.state.total_volume += qty_change as u64;
-                //            ctx.state.total_trades += 1;
-                //        }
-                //    }
-                //}
-
                 ctx.state.market_state.mid_price = (ctx.state.best_ask + ctx.state.best_bid)/dec!(2);
                 // mid price changed so the unrelaised pnl aslo changes 
                 if ctx.state.inventory.quantity != dec!(0){
                     let new_unrealised = (ctx.state.market_state.mid_price - ctx.state.inventory.avg_entry_price)*ctx.state.inventory.quantity;
                     ctx.state.pnl.update(ctx.state.pnl.realized, new_unrealised);
                 }
-
                 // bootstrappijg per symbol 
-                
             }
             None =>{
                 return Err(MmError::SymbolNotFound);
@@ -1072,99 +910,6 @@ impl MarketMaker{
         }
         Ok(())
     }
-
-    //pub fn check_if_depth_update_causes_cancellation(&mut self , symbol : u32){
-    //    
-    //    let symbol_context = match self.symbol_ctx.get_mut(&symbol){
-    //        Some(ctx)=>ctx ,
-    //        None => return 
-    //    };
-//
-    //    let mid_price_move = (symbol_context.state.market_state.mid_price - symbol_context.state.prev_mid_price).abs();
-    //    // percentage change in price 
-    //    //let price_move_pct = if symbol_context.state.prev_mid_price != dec!(0) {
-    //    //    (mid_price_move / symbol_context.state.prev_mid_price).to_f64().unwrap_or(0.0)
-    //    //} else {
-    //    //    0.0
-    //    //};
-//
-    //    let mid_price_move_in_ticks = mid_price_move/TICK_SIZE;
-//
-    //    if mid_price_move_in_ticks >= dec!(3) {  
-    //        for order in &mut symbol_context.orders.pending_orders {
-    //            if order.state != OrderState::Active {
-    //                continue;
-    //            }
-    //            // cancellation when there becomes no chance of matching 
-    //            // doing only urgent and instantanoues cancellations here , that definately need to be cancelled 
-    //            // the orders are crossing the market 
-    //            let should_cancel = match order.side {
-    //                Side::BID => order.price > symbol_context.state.market_state.mid_price,  // Bid above mid
-    //                Side::ASK => order.price < symbol_context.state.market_state.mid_price,  // Ask below mid
-    //            };
-    //            
-    //            if should_cancel {
-    //                if let Some(order_id) = order.exchange_order_id {
-    //                    // send cancellation request 
-    //                    self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-    //                    order.state = OrderState::PendingCancel;
-    //                }
-    //            }
-    //            // stale orders getting canclled before we requote 
-    //        }
-    //    }
-//
-//
-    //    let current_spread = symbol_context.state.best_ask - symbol_context.state.best_bid;
-    //    let spread_in_ticks = current_spread/TICK_SIZE;
-//
-    //    if spread_in_ticks < MIN_PROFITABLE_SPREAD_IN_TICKS {  
-    //        
-    //        for order in &mut symbol_context.orders.pending_orders {
-    //            if order.state == OrderState::Active {
-    //                if let Some(order_id) = order.exchange_order_id {
-    //                    self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-    //                    order.state = OrderState::PendingCancel;
-    //                }
-    //            }
-    //        }
-    //        return;  // No need to check other triggers
-    //    }
-    //    
-//
-    //    if symbol_context.state.prev_best_bid_qty > 0 {
-    //        let bid_depth_ratio = symbol_context.state.best_bid_qty as f64 / symbol_context.state.prev_best_bid_qty as f64;
-    //        
-    //        if bid_depth_ratio < 0.3 {  // 70% of depth gone
-    //            
-    //            
-    //            for order in &mut symbol_context.orders.pending_orders {
-    //                if order.side == Side::BID && order.state == OrderState::Active {
-    //                    if let Some(order_id) = order.exchange_order_id {
-    //                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-    //                        order.state = OrderState::PendingCancel;
-    //                    }
-    //                }
-    //            }
-    //        }
-    //    }
-    //    if symbol_context.state.prev_best_ask_qty > 0 {
-    //        let ask_depth_ratio = symbol_context.state.best_ask_qty as f64 / symbol_context.state.prev_best_ask_qty as f64;
-    //        
-    //        if ask_depth_ratio < 0.3 {
-    //            for order in &mut symbol_context.orders.pending_orders {
-    //                if order.side == Side::ASK && order.state == OrderState::Active {
-    //                    if let Some(order_id) = order.exchange_order_id {
-    //                       //self.send_cancel_request(symbol, order.client_id, order_id);
-    //                        self.cancel_batch.push(CancelData { symbol, client_id: order.client_id, order_id  : Some(order_id) });
-    //                        order.state = OrderState::PendingCancel;
-    //                    }
-    //                }
-    //            }
-    //        }
-    //    }
-    //}
-
 
     pub fn send_cancel_request(&mut self , symbol : u32 , client_id : u64 , order_id : u64 )->Result<() , QueueError>{
         match self.order_queue.enqueue(MmOrder { 
@@ -1463,12 +1208,7 @@ impl MarketMaker{
         
                     }
                 }
-            }
-
-
-
-
-
+            } 
         }
     }
 }
