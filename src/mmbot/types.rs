@@ -139,3 +139,10 @@ pub struct TargetLadder {
     pub bids : Vec<TargetQuotes> , 
     pub asks : Vec<TargetQuotes>,
 }
+
+
+pub enum SafetyCheck{
+    Pass , 
+    Fail , 
+    OrderNotActive
+}

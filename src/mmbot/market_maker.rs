@@ -5,7 +5,7 @@ use std::{collections::VecDeque, time::{Instant}};
 use crate::{mmbot::{constants::{
     BOOTSTRAP_LEVELS, BOOTSTRAP_SPREAD_PCT, CAPPED_LEVELS, MAX_ALLOWED_NEG_REALISED_PNL, MAX_ALLOWED_NEG_TOTAL_PNL, NORMAL_LEVELS, NORMAL_SIZE_DECAY, STRESSED_LEVELS, STRESSED_SPREAD_MULT, WARMUP_DURATION},
       rolling_price::RollingPrice, 
-    types::{CancelData, InventorySatus, MmError, PostData, QuotingParamLimits, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
+    types::{CancelData, InventorySatus, MmError, PostData, QuotingParamLimits, SafetyCheck, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
     fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, 
     order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, 
@@ -101,33 +101,37 @@ impl SymbolState{
         }
 
         let inv = self.inventory.quantity;
-        let dev = inv - TARGET_INVENTORY; 
-        let abs_dev = dev.abs();
+        let deviation = inv - TARGET_INVENTORY; 
+        let abs_dev = deviation.abs();
+        let inv_ratio = (abs_dev / INVENTORY_CAP).min(dec!(1));
+        let inv_ratio_f = inv_ratio.to_f64().unwrap_or(1.0);
 
         
         let vol = self.market_state.volatility.max(dec!(0));
-        let vol_factor = dec!(1) / (dec!(1) + vol); // in (0,1]
-
-        let inv_ratio = (abs_dev / INVENTORY_CAP).min(dec!(1));
-
-        
-        let inv_ratio_f = inv_ratio.to_f64().unwrap_or(1.0);
+        let vol_factor = dec!(1) / (dec!(1) + vol); // in (0,1] , harmonic decay 
         let vol_factor_f = vol_factor.to_f64().unwrap_or(0.1);
 
        
-        let mut base = (MAX_SIZE_FOR_ORDER.to_f64().unwrap_or(50.0) * vol_factor_f).round() as i64;
-        base = base.max(1);
+        let mut base = (MAX_SIZE_FOR_ORDER.to_f64().unwrap_or(100.0) * vol_factor_f).round() as i64;
+        base = std::cmp::max(1 , base); 
 
         
+        // 1-inventory ratio btw 0-1
         let risky_mult = (1.0 - inv_ratio_f).clamp(0.0, 1.0);
+
+        // 1 + inv ratio , btw 1-2
         let safe_mult  = (1.0 + inv_ratio_f).clamp(1.0, 2.0);
 
-        let (mut bid_size, mut ask_size) = if dev >= dec!(0) {
-            // too long => don't buy more, sell more
+
+      
+        // deviation positive , we are long
+        let (mut bid_size, mut ask_size) = if deviation >= dec!(0) {
+            // we need to sell more  , reduce bid size  , increase sell size
             ((base as f64 * risky_mult).round() as i64,
              (base as f64 * safe_mult).round() as i64)
         } else {
-            // too short => buy more, don't sell more
+           // deviation neg , we are shott 
+           // we need to buy more 
             ((base as f64 * safe_mult).round() as i64,
              (base as f64 * risky_mult).round() as i64)
         };
@@ -135,10 +139,10 @@ impl SymbolState{
         
         if abs_dev >= INVENTORY_CAP {
           
-            if dev > dec!(0) {
+            if deviation > dec!(0) {
               
                 bid_size = 0;
-            } else if dev < dec!(0) {
+            } else if deviation < dec!(0) {
               
                 ask_size = 0;
             } else {
@@ -166,6 +170,7 @@ impl SymbolState{
 
         (bid_size as u64, ask_size as u64)
     }
+
 
     pub fn determine_regime(&mut self )->TradingRegime{
         if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL 
@@ -661,6 +666,31 @@ impl SymbolContext{
         self.orders.last_quote_time = Instant::now();
 
         Ok((order_to_cancel , order_to_post))
+    }
+
+
+    pub fn safety_cancel_check(&mut self , order : PendingOrder)->SafetyCheck{
+       
+            if order.state != OrderState::Active {
+                return SafetyCheck::OrderNotActive;
+            }
+            let mut cancel = false;
+            
+            if order.created_at.elapsed() >= MAX_ORDER_AGE{
+                cancel = true;
+            }
+
+            match order.side {
+                Side::BID => if order.price >= self.state.best_ask { cancel = true; },
+                Side::ASK => if order.price <= self.state.best_bid { cancel = true; },
+            }
+
+            if cancel{
+                return SafetyCheck::Fail
+            }
+
+            SafetyCheck::Pass
+       
     }
 }
 
