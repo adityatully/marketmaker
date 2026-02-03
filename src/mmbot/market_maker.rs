@@ -175,12 +175,15 @@ impl SymbolState{
     pub fn determine_regime(&mut self )->TradingRegime{
         if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL 
             || self.pnl.realized < MAX_ALLOWED_NEG_REALISED_PNL {
-            if self.regime != TradingRegime::Emergency {
-                self.regime = TradingRegime::Emergency;
+            if self.regime != TradingRegime::Recovery {
+                self.regime = TradingRegime::Recovery;
                 self.regime_start_time = Instant::now();
             }
-            return TradingRegime::Emergency;
+            return TradingRegime::Recovery;
         }
+
+        // exiting recovery mode 
+
 
         if self.regime == TradingRegime::WarmUp{
             let enough_time = self.regime_start_time.elapsed() >= WARMUP_DURATION;
@@ -242,19 +245,19 @@ impl SymbolState{
 
     pub fn get_quoting_params(&self)->QuotingParamLimits{
         match self.regime {
-            TradingRegime::Emergency=>{
+            TradingRegime::Recovery=>{
                 QuotingParamLimits { 
-                    num_levels: 0, 
-                    should_use_as: false, 
-                    min_spread_ticks: dec!(0), 
-                    max_distance_from_mid: dec!(0)
+                    num_levels: 5,  // same levels of quotes 
+                    should_use_as: true, // need to generate quotes  
+                    min_spread_ticks: dec!(12), // increase the spread from the normal mode 
+                    max_distance_from_mid: dec!(8)   
                 }
             }
             TradingRegime::Normal=>{
                 QuotingParamLimits { 
                     num_levels: 5, 
                     should_use_as: true, 
-                    min_spread_ticks: dec!(10), 
+                    min_spread_ticks: dec!(10),    // should reducde this 
                     max_distance_from_mid: dec!(10) 
                 }
             }
@@ -670,7 +673,6 @@ impl SymbolContext{
 
 
     pub fn safety_cancel_check(&mut self , order : PendingOrder)->SafetyCheck{
-       
             if order.state != OrderState::Active {
                 return SafetyCheck::OrderNotActive;
             }
@@ -681,8 +683,12 @@ impl SymbolContext{
             }
 
             match order.side {
-                Side::BID => if order.price >= self.state.best_ask { cancel = true; },
-                Side::ASK => if order.price <= self.state.best_bid { cancel = true; },
+                Side::BID => if order.price >= self.state.best_ask { 
+                    cancel = true;
+                 },
+                Side::ASK => if order.price <= self.state.best_bid { 
+                    cancel = true; 
+                }
             }
 
             if cancel{

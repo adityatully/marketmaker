@@ -42,8 +42,8 @@ pub const INVENTORY_CANCELLATION_TRIGGER_AMNT : Decimal = dec!(0.85);
 pub const MAX_ORDER_AGE: Duration = Duration::from_secs(15*60); 
 
 // PNL CAPS
-pub const MAX_ALLOWED_NEG_TOTAL_PNL : Decimal = dec!(-4000);
-pub const MAX_ALLOWED_NEG_REALISED_PNL : Decimal = dec!(-2000);
+pub const MAX_ALLOWED_NEG_TOTAL_PNL : Decimal = dec!(-10000);
+pub const MAX_ALLOWED_NEG_REALISED_PNL : Decimal = dec!(-5000);
 
 
 // CANCEL THRESHOLDS FOR VAUROUS MODES 
