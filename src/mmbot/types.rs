@@ -83,7 +83,8 @@ pub struct PendingOrder{
 pub enum MmError{
     SymbolNotFound ,
     ClienIdNotFound , 
-    CouldNotCalculateQuotes
+    CouldNotCalculateQuotes , 
+    ASquoteError
 }
 
 
@@ -144,4 +145,10 @@ pub enum SafetyCheck{
     Pass , 
     Fail , 
     OrderNotActive
+}
+
+#[derive(Debug)]
+pub struct PnlRiskMultiplier {
+    pub spread_mult: Decimal,
+    pub size_mult: Decimal,
 }

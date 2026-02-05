@@ -91,3 +91,9 @@ pub const WARMUP_DURATION : Duration = Duration::from_secs(400);
 
 
 pub const RECOVERY_DURATION : Duration = Duration::from_secs(600);
+
+
+pub const PNL_NO_LOSS: Decimal = dec!(0);
+pub const PNL_MILD_LOSS: Decimal = dec!(5000.0);    // $5k
+pub const PNL_SEVERE_LOSS: Decimal = dec!(20000.0); // $20k
+pub const PNL_MAX_LOSS: Decimal = dec!(50000.0);    // $50k (max adjustment)
