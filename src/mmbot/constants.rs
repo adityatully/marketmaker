@@ -4,7 +4,6 @@ use market_maker_rs::dec;
 use rust_decimal::Decimal;
 
 
-
 // constant for the global tick size 
 pub const TICK_SIZE : Decimal = dec!(0.25);
 
@@ -77,9 +76,6 @@ pub const MIN_SAMPLES_TO_EXIT_BOOTSTRAP : usize = 100;
 
 
 
-
-
-
 pub const BOOTSTRAP_SPREAD_PCT : Decimal = dec!(0.05);
 pub const BOOTSTRAP_LEVELS : usize = 4;
 pub const NORMAL_LEVELS : usize = 6;
@@ -92,3 +88,6 @@ pub const CAPPED_LEVELS : usize = 2;
 pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that the mm will be alloted after the ipo
 
 pub const WARMUP_DURATION : Duration = Duration::from_secs(400); 
+
+
+pub const RECOVERY_DURATION : Duration = Duration::from_secs(600);

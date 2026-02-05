@@ -9,7 +9,6 @@ use rust_decimal::Decimal;
 pub enum TradingRegime{
     WarmUp ,
     Normal ,
-    Recovery
 }
 
 pub struct QuotingParamLimits{

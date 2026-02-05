@@ -3,7 +3,7 @@ use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimato
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Instant}};
 use crate::{mmbot::{constants::{
-    BOOTSTRAP_LEVELS, BOOTSTRAP_SPREAD_PCT, CAPPED_LEVELS, MAX_ALLOWED_NEG_REALISED_PNL, MAX_ALLOWED_NEG_TOTAL_PNL, NORMAL_LEVELS, NORMAL_SIZE_DECAY, STRESSED_LEVELS, STRESSED_SPREAD_MULT, WARMUP_DURATION},
+    BOOTSTRAP_LEVELS, BOOTSTRAP_SPREAD_PCT, CAPPED_LEVELS, MAX_ALLOWED_NEG_REALISED_PNL, MAX_ALLOWED_NEG_TOTAL_PNL, NORMAL_LEVELS, NORMAL_SIZE_DECAY, RECOVERY_DURATION, STRESSED_LEVELS, STRESSED_SPREAD_MULT, WARMUP_DURATION},
       rolling_price::RollingPrice, 
     types::{CancelData, InventorySatus, MmError, PostData, QuotingParamLimits, SafetyCheck, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
@@ -173,17 +173,6 @@ impl SymbolState{
 
 
     pub fn determine_regime(&mut self )->TradingRegime{
-        if self.pnl.total < MAX_ALLOWED_NEG_TOTAL_PNL 
-            || self.pnl.realized < MAX_ALLOWED_NEG_REALISED_PNL {
-            if self.regime != TradingRegime::Recovery {
-                self.regime = TradingRegime::Recovery;
-                self.regime_start_time = Instant::now();
-            }
-            return TradingRegime::Recovery;
-        }
-
-        // exiting recovery mode 
-
 
         if self.regime == TradingRegime::WarmUp{
             let enough_time = self.regime_start_time.elapsed() >= WARMUP_DURATION;
@@ -245,14 +234,6 @@ impl SymbolState{
 
     pub fn get_quoting_params(&self)->QuotingParamLimits{
         match self.regime {
-            TradingRegime::Recovery=>{
-                QuotingParamLimits { 
-                    num_levels: 5,  // same levels of quotes 
-                    should_use_as: true, // need to generate quotes  
-                    min_spread_ticks: dec!(12), // increase the spread from the normal mode 
-                    max_distance_from_mid: dec!(8)   
-                }
-            }
             TradingRegime::Normal=>{
                 QuotingParamLimits { 
                     num_levels: 5, 
