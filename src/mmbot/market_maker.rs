@@ -265,7 +265,7 @@ impl SymbolContext{
 
         let quoting_limits = self.state.get_quoting_params();
 
-        let curr_spread_ticks = (best_ask - best_ask)/TICK_SIZE;
+        let curr_spread_ticks = (best_ask - best_bid)/TICK_SIZE;
 
         if curr_spread_ticks < quoting_limits.min_spread_ticks{
             let min_spread = quoting_limits.min_spread_ticks * TICK_SIZE;
@@ -341,13 +341,13 @@ impl SymbolContext{
                     // this is a bid order , 
                     target_ladder.bids.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
+                        target_quote.level == order.level && ((order.price - target_quote.price).abs()/TICK_SIZE) <= PRICE_TOLERANCE_IN_TICKS
                     )
                 }
                 Side::ASK=>{
                     target_ladder.asks.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
+                        target_quote.level == order.level && ((order.price - target_quote.price).abs()/TICK_SIZE) <= PRICE_TOLERANCE_IN_TICKS
                     )
                 }
             };
@@ -365,7 +365,7 @@ impl SymbolContext{
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
+                 && ((target_quote.price-current_quote.price).abs())/TICK_SIZE <= PRICE_TOLERANCE_IN_TICKS
             );
 
             if !already_have {
@@ -385,7 +385,7 @@ impl SymbolContext{
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
+                 && ((target_quote.price-current_quote.price).abs())/TICK_SIZE <= PRICE_TOLERANCE_IN_TICKS
             );
 
             if !already_have {
@@ -794,10 +794,9 @@ impl MarketMaker{
 
                 if ctx.state.last_volatility_calc.elapsed() >= VOLITILTY_CALC_GAP{
                     let new_vol = self.volitality_estimator.calculate_simple(ctx.state.rolling_prices.as_slice_for_volatility());
-                    if new_vol.is_err(){
-                        eprint!("error in volatility calc");
+                    if let Ok(vol) = new_vol{
+                        ctx.state.market_state.volatility = vol ;
                     }
-                    ctx.state.market_state.volatility = new_vol.unwrap();
                     ctx.state.last_volatility_calc = Instant::now();
                 }
 
@@ -824,6 +823,7 @@ impl MarketMaker{
                             eprintln!("⚠️  Reconcile error for {}: {:?}", symbol, e);
                         }
                     }
+                    ctx.state.last_management_cycle_time = Instant::now(); 
                 }
             }
             
