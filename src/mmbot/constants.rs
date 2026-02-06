@@ -16,9 +16,6 @@ pub const MAX_SYMBOLS : usize = 100;
 // time gap after which volatility will be recalculated 
 pub const VOLITILTY_CALC_GAP  : Duration = Duration::from_millis(100);
 
-// time gap after which quoting will happen 
-pub const QUOTING_GAP : Duration = Duration::from_millis(200);
-
 // the entire incremental requote and should requote logic 
 pub const MANAGEMENT_CYCLE_GAP : Duration = Duration::from_millis(250);
 
@@ -28,32 +25,18 @@ pub const TARGET_INVENTORY : Decimal = dec!(0);
 // maximim size for an order 
 pub const MAX_SIZE_FOR_ORDER : Decimal = dec!(100) ; 
 
-// max inventory limit
+// max inventory limit , 
 pub const INVENTORY_CAP :Decimal = dec!(1000);
 
 
 pub const MAX_BOOK_MULT : Decimal = dec!(2);
 
-// inventory percentage to cancel 
-pub const INVENTORY_CANCELLATION_TRIGGER_AMNT : Decimal = dec!(0.85);
-
 // max age -> 15 mins
 pub const MAX_ORDER_AGE: Duration = Duration::from_secs(15*60); 
 
 // PNL CAPS
-pub const MAX_ALLOWED_NEG_TOTAL_PNL : Decimal = dec!(-10000);
-pub const MAX_ALLOWED_NEG_REALISED_PNL : Decimal = dec!(-5000);
-
-
-
-// cancel threshhold , mid price , above this cancel 
-pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL : Decimal = dec!(12);
-
-// min profitable spread in ticks , below this , cancel 
-pub const MIN_PROFITABLE_SPREAD_IN_TICKS : Decimal = dec!(2);
-
-
-
+pub const MAX_ALLOWED_NEG_TOTAL_PNL : Decimal = dec!(-50000);
+pub const MAX_ALLOWED_NEG_REALISED_PNL : Decimal = dec!(-25000);
 
 pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that the mm will be alloted after the ipo
 
@@ -63,8 +46,3 @@ pub const PRICE_TOLERANCE_IN_TICKS: Decimal = dec!(1);
 
 
 
-
-pub const PNL_NO_LOSS: Decimal = dec!(0);
-pub const PNL_MILD_LOSS: Decimal = dec!(5000.0);    // $5k
-pub const PNL_SEVERE_LOSS: Decimal = dec!(20000.0); // $20k
-pub const PNL_MAX_LOSS: Decimal = dec!(50000.0);    // $50k (max adjustment)

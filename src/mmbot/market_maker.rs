@@ -2,9 +2,9 @@ use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimato
     prelude::{InventoryPosition, MarketState, PnL}, strategy::{avellaneda_stoikov::calculate_optimal_quotes}};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Instant}};
-use crate::{mmbot::{constants::{PNL_MAX_LOSS, PRICE_TOLERANCE_IN_TICKS, WARMUP_DURATION},
+use crate::{mmbot::{constants::{ MAX_ALLOWED_NEG_TOTAL_PNL, PRICE_TOLERANCE_IN_TICKS, WARMUP_DURATION},
       rolling_price::RollingPrice, 
-    types::{CancelData, InventorySatus, MmError, PnlRiskMultiplier, PostData, QuotingParamLimits, SafetyCheck, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
+    types::{CancelData, InventorySatus, MmError, PnlRiskMultiplier, PostData, QuotingParamLimits, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
     fill_queue_mm::{MarketMakerFill, MarketMakerFillQueue}, 
     order_queue_mm::{MarketMakerOrderQueue, MmOrder, QueueError}, 
@@ -69,9 +69,9 @@ impl SymbolState{
             last_sample_time : Instant::now() ,
             last_volatility_calc : Instant::now() ,
             last_management_cycle_time : Instant::now(),
-            risk_aversion :dec!(0) , // decide ,,
-            time_to_terminal : 0 , // decide 
-            liquidity_k : dec!(0) , // decide , 
+            risk_aversion :dec!(0.1) , 
+            time_to_terminal :  6 * 3600 * 1000 , // tune 
+            liquidity_k : dec!(0.2) , // tune  , 
             regime : TradingRegime::WarmUp , 
             regime_start_time : Instant::now()
         }
@@ -205,8 +205,7 @@ impl SymbolState{
         let realized_loss = self.pnl.realized.min(dec!(0)).abs();
         let worst_loss = total_loss.max(realized_loss);
         
-        let loss_ratio = (worst_loss / PNL_MAX_LOSS).min(dec!(1.0));
-        
+        let loss_ratio = (worst_loss / MAX_ALLOWED_NEG_TOTAL_PNL).min(dec!(1.0));
         // PnL affects SIZE ONLY (spread is AS-optimal)
         PnlRiskMultiplier {
             spread_mult: dec!(1.0),  // NO spread adjustment
