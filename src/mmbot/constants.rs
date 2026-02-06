@@ -45,21 +45,6 @@ pub const MAX_ALLOWED_NEG_TOTAL_PNL : Decimal = dec!(-10000);
 pub const MAX_ALLOWED_NEG_REALISED_PNL : Decimal = dec!(-5000);
 
 
-// CANCEL THRESHOLDS FOR VAUROUS MODES 
-// boostrap
-pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL_BOOTSTRAP : Decimal = dec!(20);
-pub const MIN_PROFITABLE_SPREAD_IN_TICKS_BOOTSTRAP : Decimal = dec!(8);
-
-// nomral 
-pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL_NORMAL : Decimal = dec!(10);
-pub const MIN_PROFITABLE_SPREAD_IN_TICKS_NORMAL : Decimal = dec!(2);
-
-
-pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL_STRESSED : Decimal = dec!(7);
-pub const MIN_PROFITABLE_SPREAD_IN_TICKS_STRESSED : Decimal = dec!(5);
-
-
-
 
 // cancel threshhold , mid price , above this cancel 
 pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL : Decimal = dec!(12);
@@ -68,21 +53,6 @@ pub const MAX_DISTANCE_IN_TICKS_TO_CANCEL : Decimal = dec!(12);
 pub const MIN_PROFITABLE_SPREAD_IN_TICKS : Decimal = dec!(2);
 
 
-
-// exit bootstrap 
-pub const MIN_TRADES_TO_EXIT_BOOTSTRAP : u64 = 7;
-pub const MIN_VOLUME_TO_EXIT_BOOTSTRAP : u64 = 400;
-pub const MIN_SAMPLES_TO_EXIT_BOOTSTRAP : usize = 100;
-
-
-
-pub const BOOTSTRAP_SPREAD_PCT : Decimal = dec!(0.05);
-pub const BOOTSTRAP_LEVELS : usize = 4;
-pub const NORMAL_LEVELS : usize = 6;
-pub const NORMAL_SIZE_DECAY : f64 = 0.85;
-pub const STRESSED_SPREAD_MULT : Decimal = dec!(2.5);
-pub const STRESSED_LEVELS : usize = 4;
-pub const CAPPED_LEVELS : usize = 2;
 
 
 pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that the mm will be alloted after the ipo

@@ -11,8 +11,7 @@ use crate::{mmbot::{constants::{PNL_MAX_LOSS, PRICE_TOLERANCE_IN_TICKS, WARMUP_D
     response_queue_mm::{MessageFromApi, MessageFromApiQueue}}};
 use rust_decimal::prelude::ToPrimitive;
 use crate::mmbot::types::{OrderState  , Side , PendingOrder};
-use crate::mmbot::constants::{SAMPLE_GAP , MAX_SYMBOLS , VOLITILTY_CALC_GAP , 
-    QUOTING_GAP , MANAGEMENT_CYCLE_GAP , TARGET_INVENTORY , MAX_SIZE_FOR_ORDER , INVENTORY_CAP , MAX_BOOK_MULT , 
+use crate::mmbot::constants::{SAMPLE_GAP , MAX_SYMBOLS , VOLITILTY_CALC_GAP  , MANAGEMENT_CYCLE_GAP , TARGET_INVENTORY , MAX_SIZE_FOR_ORDER , INVENTORY_CAP , MAX_BOOK_MULT , 
     TICK_SIZE    ,
     MAX_ORDER_AGE 
 }; 
@@ -31,12 +30,6 @@ pub struct SymbolState{
     pub best_bid_qty: u32,
     pub best_ask_qty: u32,
 
-    // prev market data 
-    pub prev_best_bid: Decimal,
-    pub prev_best_ask: Decimal,
-    pub prev_best_bid_qty: u32,
-    pub prev_best_ask_qty: u32,
-    pub prev_mid_price: Decimal,
     pub market_state : MarketState,
     // rolling price history for volatility calculation , each symbol 
     pub rolling_prices: RollingPrice, 
@@ -69,11 +62,6 @@ impl SymbolState{
             best_bid : ipo_price ,
             best_ask_qty : 0 , 
             best_bid_qty : 0 ,
-            prev_best_ask : dec!(0),
-            prev_best_bid : dec!(0) ,
-            prev_best_bid_qty : 0 , 
-            prev_best_ask_qty : 0 ,
-            prev_mid_price : ipo_price,
             market_state : MarketState { mid_price: ipo_price, volatility: dec!(0), timestamp: 0 } ,
             rolling_prices : RollingPrice { deque: VecDeque::with_capacity(100), capacity: 100 } ,
             inventory : InventoryPosition::new() ,
@@ -254,7 +242,7 @@ impl SymbolContext{
                 asks: Vec::new(),
             });
         }
-
+        // prices are being calculated considering all factors 
         let (mut best_bid , mut best_ask) = match self.state.regime{
             TradingRegime::WarmUp =>{
                 let spread = mid * dec!(0.02);
@@ -455,18 +443,9 @@ pub struct MarketMaker{
     pub feed_queue    : MarketMakerFeedQueue,
     pub volitality_estimator : VolatilityEstimator ,
 
-
-
-    //ORDER MANAGER 
     pub order_queue   : MarketMakerOrderQueue,
-  //  pub symbol_orders: FxHashMap<u32, SymbolOrders>,
-
 
     pub symbol_ctx  : FxHashMap<u32 , SymbolContext>,
-
-    // quoting engine , currrent mode shud also be per symbol 
-
-
     pub cancel_batch : Vec<CancelData>,
     pub post_batch   : Vec<PostData>
   
@@ -507,13 +486,6 @@ impl MarketMaker{
         
         match self.symbol_ctx.get_mut(&symbol) {
             Some(ctx)=>{
-                // store the prev best
-                ctx.state.prev_best_bid = ctx.state.best_bid;
-                ctx.state.prev_best_ask = ctx.state.best_ask;
-                ctx.state.prev_best_bid_qty = ctx.state.best_bid_qty;
-                ctx.state.prev_best_ask_qty = ctx.state.best_ask_qty;
-                ctx.state.prev_mid_price = ctx.state.market_state.mid_price;
-
                 ctx.state.best_ask = Decimal::from(market_feed.best_ask);
                 ctx.state.best_bid = Decimal::from(market_feed.best_bid);
                 ctx.state.best_ask_qty = market_feed.best_ask_qty;
@@ -525,7 +497,6 @@ impl MarketMaker{
                     let new_unrealised = (ctx.state.market_state.mid_price - ctx.state.inventory.avg_entry_price)*ctx.state.inventory.quantity;
                     ctx.state.pnl.update(ctx.state.pnl.realized, new_unrealised);
                 }
-                // bootstrappijg per symbol 
             }
             None =>{
                 return Err(MmError::SymbolNotFound);
@@ -571,10 +542,8 @@ impl MarketMaker{
                 // update PNL 
                 match self.symbol_ctx.get_mut(&symbol){
                     Some(ctx)=>{
-                       // let old_qty = symbol_state.inventory.quantity;
+                       
                         let old_realised = ctx.state.pnl.realized;
-                     //   let old_unrealised = symbol_state.pnl.unrealized;
-
                         // actual PNL that took place from the bid ask spread 
                         let realized_pnl_from_sale = (fill_price - ctx.state.inventory.avg_entry_price) * fill_qty;
 
@@ -807,7 +776,7 @@ impl MarketMaker{
                         self.handle_order_cancel_ack(api_message).expect("coundt handle the order cancellation ack ")
                     }
                     _=>{
-                        eprintln!("uidentified message type ");
+                        eprintln!("uidentified message type");
                     }
                 }
             }
@@ -815,7 +784,9 @@ impl MarketMaker{
 
             // updating the steate loop
             for (symbol  , ctx) in self.symbol_ctx.iter_mut(){
+
                 ctx.state.determine_regime();
+
                 if ctx.state.last_sample_time.elapsed() >= SAMPLE_GAP{
                     ctx.state.rolling_prices.push(ctx.state.market_state.mid_price);
                     ctx.state.last_sample_time = Instant::now();
