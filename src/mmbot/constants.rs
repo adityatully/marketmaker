@@ -89,8 +89,9 @@ pub const BASE_SIZE_BOOTSTRAP: u64 = 100; // configure acc to the shares that th
 
 pub const WARMUP_DURATION : Duration = Duration::from_secs(400); 
 
+pub const PRICE_TOLERANCE_IN_TICKS: Decimal = dec!(1);
 
-pub const RECOVERY_DURATION : Duration = Duration::from_secs(600);
+
 
 
 pub const PNL_NO_LOSS: Decimal = dec!(0);

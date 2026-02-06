@@ -2,7 +2,7 @@ use market_maker_rs::{Decimal, dec, market_state::volatility::VolatilityEstimato
     prelude::{InventoryPosition, MarketState, PnL}, strategy::{avellaneda_stoikov::calculate_optimal_quotes}};
 use rustc_hash::FxHashMap;
 use std::{collections::VecDeque, time::{Instant}};
-use crate::{mmbot::{constants::{PNL_MAX_LOSS, PNL_NO_LOSS, WARMUP_DURATION},
+use crate::{mmbot::{constants::{PNL_MAX_LOSS, PRICE_TOLERANCE_IN_TICKS, WARMUP_DURATION},
       rolling_price::RollingPrice, 
     types::{CancelData, InventorySatus, MmError, PnlRiskMultiplier, PostData, QuotingParamLimits, SafetyCheck, SymbolOrders, TargetLadder, TargetQuotes, TradingRegime}}, 
     shm::{feed_queue_mm::{MarketMakerFeed, MarketMakerFeedQueue}, 
@@ -37,7 +37,6 @@ pub struct SymbolState{
     pub prev_best_bid_qty: u32,
     pub prev_best_ask_qty: u32,
     pub prev_mid_price: Decimal,
-    // market state for storing volatility and mid price for each symbol 
     pub market_state : MarketState,
     // rolling price history for volatility calculation , each symbol 
     pub rolling_prices: RollingPrice, 
@@ -148,8 +147,6 @@ impl SymbolState{
                
             }
         }
-
-      
         let max_size_i64 = MAX_SIZE_FOR_ORDER.to_i64().unwrap_or(50);
         bid_size = bid_size.clamp(0, max_size_i64);
         ask_size = ask_size.clamp(0, max_size_i64);
@@ -243,81 +240,6 @@ impl SymbolContext{
             orders : SymbolOrders::new(symbol)
         }
     }
-
-    pub fn check_if_time_caused_cancellation( &mut self,
-        symbol: u32, cancel_batch: &mut Vec<CancelData>, ){
-        
-
-        for order in &mut self.orders.pending_orders {
-            if order.state != OrderState::Active {
-                continue;
-            }
-
-            let age = order.created_at.elapsed();
-            if age > MAX_ORDER_AGE {
-                if let Some(order_id) = order.exchange_order_id {
-                    // sen directly to the order cancell queue , expose a function 
-                    cancel_batch.push(CancelData { symbol  , client_id: order.client_id, order_id: Some(order_id) });
-                    order.state = OrderState::PendingCancel;
-                }
-            }
-        }
-    }
-    pub fn should_requote(&self) -> bool {
-
-
-        // dont quote again in emergency mode 
-        //if matches!(self.state.current_mode, QuotingMode::Emergency) {
-        //    return false;
-        //}
-        
-
-        // not enough time passed 
-        if self.orders.last_quote_time.elapsed() < QUOTING_GAP {
-            return false;
-        }
-
-        // mode chNged 
-        //if self.state.current_mode != self.state.prev_mode {
-        //    return true;
-        //}
-        
-        // getting active orders
-        let active_bids = self.orders.pending_orders.iter()
-            .filter(|o| o.side == Side::BID && matches!(o.state, OrderState::Active))
-            .count();
-        
-        let active_asks = self.orders.pending_orders.iter()
-            .filter(|o| o.side == Side::ASK && matches!(o.state, OrderState::Active))
-            .count();
-        
-        let total_active = active_bids + active_asks;
-        
-        
-        if total_active == 0 {
-            return true;
-        }
-        
-        
-
-
-        let mid_move = (self.state.market_state.mid_price - self.state.prev_mid_price).abs();
-        let mid_move_ticks = mid_move/TICK_SIZE;
-        //let mid_move_pct = if self.state.prev_mid_price != dec!(0) {
-        //    (mid_move / self.state.prev_mid_price).to_f64().unwrap_or(0.0)
-        //} else {
-        //    0.0
-        //};
-
-         // 0.05% mid drift triggers requote (tune this)
-        if mid_move_ticks >= dec!(2) {
-            return true;
-        }
-        // default dont 
-        false
-    }
-
-
     pub fn compute_target_ladder(&self)->Result<TargetLadder , MmError>{
         let mut bids = Vec::new();
         let mut asks = Vec::new();
@@ -414,15 +336,10 @@ impl SymbolContext{
     }
 
 
-
-
-    pub fn incremental_requote(&mut self ,  target_ladder : &mut TargetLadder , symbol : u32)->Result<(Vec<(u64 , u64)> , Vec<PostData>) , MmError>{
-        const PRICE_TOLERANCE: Decimal = dec!(0.1);  // 10 cent / 10 paise 
-        
-     //   let mut orders_to_keep = Vec::new();
+    pub fn incremental_requote(&mut self ,  target_ladder : &mut TargetLadder , symbol : u32)->Result<(Vec<CancelData> , Vec<PostData>) , MmError>{
+          
         let mut order_to_cancel = Vec::new();   
         let mut order_to_post = Vec::new();
-
 
 
         for order in &mut self.orders.pending_orders{
@@ -436,35 +353,31 @@ impl SymbolContext{
                     // this is a bid order , 
                     target_ladder.bids.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE
+                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
                     )
                 }
                 Side::ASK=>{
                     target_ladder.asks.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE
+                        target_quote.level == order.level && (order.price - target_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
                     )
                 }
             };
 
-            if should_keep {
-                //orders_to_keep.push(order);
-                // if it is not in cancel we obviously are keeping it 
-            }
-            else{
+            if !should_keep{
                 // we send for canncelation 
                 if let Some(order_id) = order.exchange_order_id{
-                    order_to_cancel.push((order_id , order.client_id)); // push here for now can cancel in main loop
+                    order_to_cancel.push(CancelData { symbol, client_id: order.client_id, order_id: Some(order_id) }); // push here for now can cancel in main loop
                 }
             }
         }
-          // identifiying the levels which are required to be posted 
+        // identifiying the levels which require new orders 
         for target_quote in &mut target_ladder.asks{
             let already_have = self.orders.pending_orders.iter().any(
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE
+                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
             );
 
             if !already_have {
@@ -484,7 +397,7 @@ impl SymbolContext{
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE
+                 && (target_quote.price-current_quote.price).abs() <= PRICE_TOLERANCE_IN_TICKS
             );
 
             if !already_have {
@@ -555,7 +468,7 @@ pub struct MarketMaker{
 
 
     pub cancel_batch : Vec<CancelData>,
-    pub post_bacth   : Vec<PostData>
+    pub post_batch   : Vec<PostData>
   
 }
 
@@ -578,16 +491,14 @@ impl MarketMaker{
             eprint!("fai;ed to open message queue");
         }
         Self { 
-            //symbol_orders : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default()),
             order_queue : order_queue.unwrap(),
             fill_queue : fill_queue.unwrap(),
             feed_queue : feed_queue.unwrap(),
             message_queue : message_from_api_queueu.unwrap(),
             volitality_estimator: VolatilityEstimator::new() , 
             symbol_ctx : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default()),
-            //symbol_states : FxHashMap::with_capacity_and_hasher(MAX_SYMBOLS, Default::default())
             cancel_batch : Vec::with_capacity(4096),
-            post_bacth : Vec::with_capacity(4096),
+            post_batch : Vec::with_capacity(4096),
         }
     }
     #[inline(always)]
@@ -855,22 +766,13 @@ impl MarketMaker{
 
         Ok((bids , asks ))
     }
-
-    pub fn cancel_all_orders(&mut self , _ : u32){
-
-    }
-
-    pub fn cancel_side(&mut self , _ : u32){
-
-    }
-
     // market maker running looop 
 
     pub fn run_market_maker(&mut self){
         loop{
             // clear the two batches 
             self.cancel_batch.clear();
-            self.post_bacth.clear();
+            self.post_batch.clear();
 
             
             while let Ok(Some(fill)) = self.fill_queue.dequeue(){
@@ -913,7 +815,7 @@ impl MarketMaker{
 
             // updating the steate loop
             for (symbol  , ctx) in self.symbol_ctx.iter_mut(){
-                let deref_symbol = *symbol;
+                ctx.state.determine_regime();
                 if ctx.state.last_sample_time.elapsed() >= SAMPLE_GAP{
                     ctx.state.rolling_prices.push(ctx.state.market_state.mid_price);
                     ctx.state.last_sample_time = Instant::now();
@@ -929,56 +831,31 @@ impl MarketMaker{
                 }
 
                 if ctx.state.last_management_cycle_time.elapsed() >= MANAGEMENT_CYCLE_GAP{
-                    for active_order in &mut ctx.orders.pending_orders{
-                       
-                       
+                    let mut target_ladder = match ctx.compute_target_ladder() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("⚠️  Could not compute target for {}: {:?}", symbol, e);
+                            continue;
+                        }
+                    };
+
+                    match ctx.incremental_requote(&mut target_ladder, *symbol) {
+                        Ok((cancels, posts)) => {
+                            for order_to_be_cancelled in cancels {
+                                self.cancel_batch.push(order_to_be_cancelled);
+                            }
+
+                            for order_to_be_posted in posts{
+                                self.post_batch.push(order_to_be_posted);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️  Reconcile error for {}: {:?}", symbol, e);
+                        }
                     }
-
-
-                    // this is very rare that this function wuld get ca;;ed , its just a cleanup function 
-                    ctx.check_if_time_caused_cancellation(*symbol, &mut self.cancel_batch);
-                    
-
-                    // if !ctx.state.is_bootstrapped && ctx.state.should_exit_bootstrap() {
-                        // ctx.state.is_bootstrapped = true;
-                    // }
-
-                   // let _ = ctx.state.determine_mode(); // no need to return , just update the mode 
-                    // can return emergency or invetnory capped also 
-
-
-                    if ctx.should_requote(){
-                        // we compute target laders and try to modify them 
-                        //match ctx.compute_target_ladder(){
-                        //    Ok(mut target_ladder)=>{
-                        //       if let Ok(requote_result) = ctx.incremental_requote(&mut target_ladder , *symbol){
-                        //            let orders_to_cancel = requote_result.0;
-                        //            let orders_to_post = requote_result.1;
-//
-                        //            for order in orders_to_cancel {
-                        //                self.cancel_batch.push(CancelData { symbol : deref_symbol , client_id: order.1, order_id: Some(order.0) });
-                        //            }
-//
-                        //            for order in orders_to_post{
-                        //                self.post_bacth.push(PostData { price: order.price, qty: order.qty, side: order.side , symbol : *symbol , level : order.level });
-                        //            }
-                        //       }
-                        //    }
-//
-                        //    Err(_)=>{
-                        //        eprint!("error occpured in the compute target ladder function ")
-                        //    }
-                        //}
-                    }
-
-
-                    // shoudl i send requsts here 
-
-
-
                 }
             }
-
+            
             // or shud i send requet here 
             // cudnt call the function becuse it took a mutable refrence to entire self 
             for cancel_order in &mut  self.cancel_batch{
@@ -1010,7 +887,7 @@ impl MarketMaker{
             }
 
 
-            for post_order in &mut self.post_bacth{
+            for post_order in &mut self.post_batch{
                 match self.symbol_ctx.get_mut(&post_order.symbol){
                     Some(ctx)=>{
                         let client_id =  ctx.orders.alloc_client_id();
