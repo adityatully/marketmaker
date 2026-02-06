@@ -228,7 +228,7 @@ impl SymbolContext{
             orders : SymbolOrders::new(symbol)
         }
     }
-    pub fn compute_target_ladder(&self)->Result<TargetLadder , MmError>{
+    pub fn compute_target_ladder(&mut self)->Result<TargetLadder , MmError>{
         let mut bids = Vec::new();
         let mut asks = Vec::new();
         
@@ -356,6 +356,7 @@ impl SymbolContext{
                 // we send for canncelation 
                 if let Some(order_id) = order.exchange_order_id{
                     order_to_cancel.push(CancelData { symbol, client_id: order.client_id, order_id: Some(order_id) }); // push here for now can cancel in main loop
+                    order.state = OrderState::PendingCancel;
                 }
             }
         }
@@ -406,31 +407,33 @@ impl SymbolContext{
     }
 
 
-    pub fn safety_cancel_check(&mut self , order : PendingOrder)->SafetyCheck{
-            if order.state != OrderState::Active {
-                return SafetyCheck::OrderNotActive;
-            }
-            let mut cancel = false;
-            
-            if order.created_at.elapsed() >= MAX_ORDER_AGE{
-                cancel = true;
-            }
-
-            match order.side {
-                Side::BID => if order.price >= self.state.best_ask { 
-                    cancel = true;
-                 },
-                Side::ASK => if order.price <= self.state.best_bid { 
-                    cancel = true; 
+    pub fn safety_cancel_check(&mut self)->Vec<(u64 , Option<u64>)>{
+            let mut order_to_be_cancelled = Vec::new();
+            for order in &mut  self.orders.pending_orders{
+                if order.state != OrderState::Active {
+                    continue;
                 }
-            }
+                let mut cancel = false;
 
-            if cancel{
-                return SafetyCheck::Fail
-            }
-
-            SafetyCheck::Pass
-       
+                if order.created_at.elapsed() >= MAX_ORDER_AGE{
+                    cancel = true;
+                }
+    
+                match order.side {
+                    Side::BID => if order.price >= self.state.best_ask { 
+                        cancel = true;
+                     },
+                    Side::ASK => if order.price <= self.state.best_bid { 
+                        cancel = true; 
+                    }
+                }
+                if cancel{
+                   // we can return 
+                   order_to_be_cancelled.push((order.client_id , order.exchange_order_id));
+                   order.state = OrderState::PendingCancel;
+                }
+            }       
+            order_to_be_cancelled
     }
 }
 
@@ -631,7 +634,7 @@ impl MarketMaker{
             Some(ctx)=>{
                 if let Some(order) = ctx.orders.pending_orders.iter_mut().find(
                     |pending_order|
-                    pending_order.client_id == api_response.client_id
+                    pending_order.client_id == api_response.client_id && pending_order.state == OrderState::PendingNew
 
                 ){
                     order.exchange_order_id = Some(api_response.order_id);
@@ -784,7 +787,7 @@ impl MarketMaker{
 
             // updating the steate loop
             for (symbol  , ctx) in self.symbol_ctx.iter_mut(){
-
+                let deref_symbol = *symbol;
                 ctx.state.determine_regime();
 
                 if ctx.state.last_sample_time.elapsed() >= SAMPLE_GAP{
@@ -808,6 +811,15 @@ impl MarketMaker{
                             continue;
                         }
                     };
+
+                    let cancels = ctx.safety_cancel_check();
+                    for order_to_be_cancelled in cancels{
+                        self.cancel_batch.push(CancelData {
+                             symbol: deref_symbol, 
+                             client_id: order_to_be_cancelled.0, 
+                             order_id: order_to_be_cancelled.1 });
+                    }
+                    
 
                     match ctx.incremental_requote(&mut target_ladder, *symbol) {
                         Ok((cancels, posts)) => {
