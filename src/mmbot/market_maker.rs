@@ -69,9 +69,9 @@ impl SymbolState{
             last_sample_time : Instant::now() ,
             last_volatility_calc : Instant::now() ,
             last_management_cycle_time : Instant::now(),
-            risk_aversion :dec!(0.1) , 
-            time_to_terminal :  6 * 3600 * 1000 , // tune 
-            liquidity_k : dec!(0.2) , // tune  , 
+            risk_aversion :dec!(0.05) , 
+            time_to_terminal :  4 * 3600 * 1000 , // tune 
+            liquidity_k : dec!(0.15) , // tune  , 
             regime : TradingRegime::WarmUp , 
             regime_start_time : Instant::now()
         }
@@ -179,7 +179,7 @@ impl SymbolState{
                 QuotingParamLimits { 
                     num_levels: 5, 
                     should_use_as: true, 
-                    min_spread_ticks: dec!(10),    // should reducde this 
+                    min_spread_ticks: dec!(7),    // should reducde this 
                     max_distance_from_mid: dec!(10) 
                 }
             }
@@ -187,17 +187,11 @@ impl SymbolState{
                 QuotingParamLimits { 
                     num_levels: 3, 
                     should_use_as: false, 
-                    min_spread_ticks: dec!(8), 
-                    max_distance_from_mid: dec!(20) 
+                    min_spread_ticks: dec!(6), 
+                    max_distance_from_mid: dec!(15) 
                 }
             }
         }
-    }
-
-    pub fn compute_volatility_multiplier(&self) -> Decimal {
-        let vol = self.market_state.volatility;
-        // 1.0x at 0% vol → 3.0x at 20% vol
-        dec!(1.0) + (vol * dec!(10.0)).min(dec!(2.0))
     }
 
     pub fn compute_pnl_risk_multiplier(&self) -> PnlRiskMultiplier {
@@ -340,13 +334,13 @@ impl SymbolContext{
                     // this is a bid order , 
                     target_ladder.bids.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && ((order.price - target_quote.price).abs()/TICK_SIZE) <= PRICE_TOLERANCE_IN_TICKS
+                        target_quote.level == order.level && ((order.price - target_quote.price).abs()) <= PRICE_TOLERANCE_IN_TICKS*TICK_SIZE
                     )
                 }
                 Side::ASK=>{
                     target_ladder.asks.iter().any(
                         |target_quote|
-                        target_quote.level == order.level && ((order.price - target_quote.price).abs()/TICK_SIZE) <= PRICE_TOLERANCE_IN_TICKS
+                        target_quote.level == order.level && ((order.price - target_quote.price).abs()) <= PRICE_TOLERANCE_IN_TICKS*TICK_SIZE
                     )
                 }
             };
@@ -365,7 +359,7 @@ impl SymbolContext{
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && ((target_quote.price-current_quote.price).abs())/TICK_SIZE <= PRICE_TOLERANCE_IN_TICKS
+                 && ((target_quote.price-current_quote.price).abs()) <= PRICE_TOLERANCE_IN_TICKS*TICK_SIZE
             );
 
             if !already_have {
@@ -385,7 +379,7 @@ impl SymbolContext{
                 |current_quote|
                 target_quote.side == current_quote.side
                  && target_quote.level == current_quote.level 
-                 && ((target_quote.price-current_quote.price).abs())/TICK_SIZE <= PRICE_TOLERANCE_IN_TICKS
+                 && ((target_quote.price-current_quote.price).abs()) <= PRICE_TOLERANCE_IN_TICKS*TICK_SIZE
             );
 
             if !already_have {
@@ -652,7 +646,7 @@ impl MarketMaker{
         match self.symbol_ctx.get_mut(&symbol){
             Some(ctx)=>{
                 // remove it now , 
-                ctx.orders.pending_orders.retain(|order| order.exchange_order_id != Some(api_response.order_id) && order.state == OrderState::PendingCancel);
+                ctx.orders.pending_orders.retain(|order| order.exchange_order_id != Some(api_response.order_id));
                 
             }
             None=>{
@@ -803,6 +797,13 @@ impl MarketMaker{
                 }
 
                 if ctx.state.last_management_cycle_time.elapsed() >= MANAGEMENT_CYCLE_GAP{
+                    //let cancels = ctx.safety_cancel_check();
+                    //for order_to_be_cancelled in cancels{
+                    //    self.cancel_batch.push(CancelData {
+                    //         symbol: deref_symbol, 
+                    //         client_id: order_to_be_cancelled.0, 
+                    //         order_id: order_to_be_cancelled.1 });
+                    //}
                     let mut target_ladder = match ctx.compute_target_ladder() {
                         Ok(t) => t,
                         Err(e) => {
@@ -810,15 +811,6 @@ impl MarketMaker{
                             continue;
                         }
                     };
-
-                    let cancels = ctx.safety_cancel_check();
-                    for order_to_be_cancelled in cancels{
-                        self.cancel_batch.push(CancelData {
-                             symbol: deref_symbol, 
-                             client_id: order_to_be_cancelled.0, 
-                             order_id: order_to_be_cancelled.1 });
-                    }
-                    
 
                     match ctx.incremental_requote(&mut target_ladder, *symbol) {
                         Ok((cancels, posts)) => {
