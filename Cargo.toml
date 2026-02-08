@@ -12,3 +12,4 @@ market-maker-rs = "0.3.0"
 rust_decimal_macros = "1.39.0"
 rust_decimal = "1.39.0"
 rustc-hash = { version = "2.1" }
+smallvec = "1.15.1"

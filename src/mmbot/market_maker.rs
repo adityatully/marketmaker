@@ -15,7 +15,7 @@ use crate::mmbot::constants::{SAMPLE_GAP , MAX_SYMBOLS , VOLITILTY_CALC_GAP  , M
     TICK_SIZE    ,
     MAX_ORDER_AGE 
 }; 
-
+use smallvec::SmallVec;
 
 
 #[derive(Debug)]
@@ -222,8 +222,9 @@ impl SymbolContext{
         }
     }
     pub fn compute_target_ladder(&mut self)->Result<TargetLadder , MmError>{
-        let mut bids = Vec::new();
-        let mut asks = Vec::new();
+        // max bid  ask levels are 5 , create of 6 
+        let mut bids = SmallVec::with_capacity(6);
+        let mut asks = SmallVec::with_capacity(6);
         
         let mid = self.state.market_state.mid_price;
         let current_spread = self.state.best_ask - self.state.best_bid;
@@ -231,8 +232,8 @@ impl SymbolContext{
         // safety check
         if spread_ticks < dec!(1) {
             return Ok(TargetLadder {
-                bids: Vec::new(),
-                asks: Vec::new(),
+                bids,
+                asks
             });
         }
         // prices are being calculated considering all factors 
@@ -317,10 +318,10 @@ impl SymbolContext{
     }
 
 
-    pub fn incremental_requote(&mut self ,  target_ladder : &mut TargetLadder , symbol : u32)->Result<(Vec<CancelData> , Vec<PostData>) , MmError>{
+    pub fn incremental_requote(&mut self ,  target_ladder : &mut TargetLadder , symbol : u32)->Result<(SmallVec<[CancelData ; 10]> , SmallVec<[PostData ;10]>) , MmError>{
           
-        let mut order_to_cancel = Vec::new();   
-        let mut order_to_post = Vec::new();
+        let mut order_to_cancel = SmallVec::with_capacity(10);   
+        let mut order_to_post = SmallVec::with_capacity(10);
 
 
         for order in &mut self.orders.pending_orders{

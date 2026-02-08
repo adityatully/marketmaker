@@ -1,5 +1,5 @@
 use std::time::Instant;
-
+use smallvec::SmallVec;
 use rust_decimal::Decimal;
 
 // level are basically price levels  how deep to quote 
@@ -138,8 +138,8 @@ pub struct TargetQuotes{
 }
 
 pub struct TargetLadder {
-    pub bids : Vec<TargetQuotes> , 
-    pub asks : Vec<TargetQuotes>,
+    pub bids : SmallVec<[TargetQuotes ; 6]>, 
+    pub asks : SmallVec<[TargetQuotes ; 6]>,
 }
 
 
